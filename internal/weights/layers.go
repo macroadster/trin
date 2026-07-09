@@ -231,3 +231,238 @@ func (s *WeightSession) PrepackTritCSV(wCSV string, K int) (built, hits int, err
 	}
 	return built, hits, nil
 }
+
+// --- v1.12 multi-layer trit-attn decoder stack ---
+
+// AttnLayerSpec describes one transformer residual layer:
+//   xn = RMSNorm(x, AttnGain)
+//   a, K, V = SessionAttnTrit(Q/K/V[/O], xn, past, …)
+//   h = x + a
+//   hn = RMSNorm(h, FFNGain)
+//   f = LinearTritCached(Down, SiLU(LinearTritCached(Up, hn)))
+//   y = h + f
+// Q/K/V are dOut×dIn (dOut==dim); O is dim×dim when non-empty; Up is hidden×dim;
+// Down is dim×hidden. Gains are length-dim vectors (empty → unit gain).
+type AttnLayerSpec struct {
+	Q, K, V, O   string
+	AttnGain     string
+	FFNGain      string
+	Up, Down     string
+	Hidden       int
+}
+
+// SiLUF32 is the elementwise sigmoid-linear unit (matches interp silu).
+func SiLUF32(x []float32) []float32 {
+	out := make([]float32, len(x))
+	for i, v := range x {
+		f := float64(v)
+		out[i] = float32(f / (1.0 + math.Exp(-f)))
+	}
+	return out
+}
+
+// ForwardAttnBlockTrit runs one residual attn+FFN block on the trit prepack cache.
+// dIn/dOut are activation dims (square residual); h is MHA heads (≤1 → single-head).
+// past K/V grow by one token; attention math stays f32, projections use trit packs.
+func (s *WeightSession) ForwardAttnBlockTrit(
+	spec AttnLayerSpec,
+	x, Kpast, Vpast []float32,
+	dim, h int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: bad dim")
+	}
+	if spec.Q == "" || spec.K == "" || spec.V == "" {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: Q/K/V required")
+	}
+	if spec.Up == "" || spec.Down == "" {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: FFN Up/Down required")
+	}
+	if spec.Hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: hidden must be > 0")
+	}
+	if h <= 0 {
+		h = 1
+	}
+	xIn := x[:dim]
+	attnGain, err := s.loadGain(spec.AttnGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit attn gain %q: %w", spec.AttnGain, err)
+	}
+	xn := RMSNormF32(xIn, eps, attnGain)
+	a, Knew, Vnew, err := s.SessionAttnTrit(
+		spec.Q, spec.K, spec.V, spec.O,
+		xn, Kpast, Vpast,
+		dim, dim, h, pos, base, bitplane,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit attn: %w", err)
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	ffnGain, err := s.loadGain(spec.FFNGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit ffn gain %q: %w", spec.FFNGain, err)
+	}
+	hn := RMSNormF32(hRes, eps, ffnGain)
+	up, _, err := s.LinearTritCached(spec.Up, hn, spec.Hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit up %q: %w", spec.Up, err)
+	}
+	act := SiLUF32(up)
+	down, _, err := s.LinearTritCached(spec.Down, act, dim, spec.Hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit down %q: %w", spec.Down, err)
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+// AttnStackTrit chains ForwardAttnBlockTrit over layers with per-layer KV caches.
+// Kpasts/Vpasts length must match layers (nil or short entries treated as empty).
+func (s *WeightSession) AttnStackTrit(
+	layers []AttnLayerSpec,
+	x []float32,
+	Kpasts, Vpasts [][]float32,
+	dim, h int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y []float32, Knews, Vnews [][]float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if len(layers) == 0 {
+		return nil, nil, nil, fmt.Errorf("attn_stack_trit: empty layers")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("attn_stack_trit: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews = make([][]float32, len(layers))
+	Vnews = make([][]float32, len(layers))
+	for i, spec := range layers {
+		var kp, vp []float32
+		if i < len(Kpasts) {
+			kp = Kpasts[i]
+		}
+		if i < len(Vpasts) {
+			vp = Vpasts[i]
+		}
+		next, kn, vn, e := s.ForwardAttnBlockTrit(spec, cur, kp, vp, dim, h, pos, base, bitplane, eps)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("attn_stack_trit layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, Knews, Vnews, nil
+}
+
+// FlattenLayerKV concatenates per-layer KV caches (layer-major): [L0 | L1 | …].
+func FlattenLayerKV(parts [][]float32) []float32 {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]float32, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// SplitLayerKV splits a layer-major flat KV into nLayers slices of equal token length.
+// Empty flat → nLayers empty slices. Each layer length must be multiple of d.
+func SplitLayerKV(flat []float32, nLayers, d int) ([][]float32, error) {
+	if nLayers <= 0 {
+		return nil, fmt.Errorf("split_layer_kv: bad nLayers")
+	}
+	if d <= 0 {
+		return nil, fmt.Errorf("split_layer_kv: bad d")
+	}
+	out := make([][]float32, nLayers)
+	if len(flat) == 0 {
+		return out, nil
+	}
+	if len(flat)%(nLayers*d) != 0 {
+		return nil, fmt.Errorf("split_layer_kv: flat len %d not multiple of nLayers*d=%d", len(flat), nLayers*d)
+	}
+	nTok := len(flat) / (nLayers * d)
+	step := nTok * d
+	for i := 0; i < nLayers; i++ {
+		base := i * step
+		out[i] = flat[base : base+step]
+	}
+	return out, nil
+}
+
+// AttnStackTritCSV is the language-friendly multi-layer trit-attn surface.
+// q/k/v/o/up/down CSVs must share the same layer count; o/gains may be shorter/empty.
+// KpastFlat/VpastFlat are layer-major flats (empty = no past). hidden applies to every layer.
+// Returns y, KnewFlat, VnewFlat.
+func (s *WeightSession) AttnStackTritCSV(
+	qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, heads int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	qs := splitCSV(qCSV)
+	ks := splitCSV(kCSV)
+	vs := splitCSV(vCSV)
+	os_ := splitCSV(oCSV)
+	ups := splitCSV(upCSV)
+	downs := splitCSV(downCSV)
+	ag := splitCSV(attnGainCSV)
+	fg := splitCSV(ffnGainCSV)
+	n := len(qs)
+	if n == 0 || len(ks) != n || len(vs) != n || len(ups) != n || len(downs) != n {
+		return nil, nil, nil, fmt.Errorf("attn_stack_trit: Q/K/V/Up/Down CSVs must share non-zero length")
+	}
+	layers := make([]AttnLayerSpec, n)
+	for i := 0; i < n; i++ {
+		spec := AttnLayerSpec{
+			Q: qs[i], K: ks[i], V: vs[i],
+			Up: ups[i], Down: downs[i],
+			Hidden: hidden,
+		}
+		if i < len(os_) {
+			spec.O = os_[i]
+		}
+		if i < len(ag) {
+			spec.AttnGain = ag[i]
+		}
+		if i < len(fg) {
+			spec.FFNGain = fg[i]
+		}
+		layers[i] = spec
+	}
+	Kpasts, err := SplitLayerKV(KpastFlat, n, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := SplitLayerKV(VpastFlat, n, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y, Knews, Vnews, err := s.AttnStackTrit(layers, x, Kpasts, Vpasts, dim, heads, pos, base, bitplane, eps)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return y, FlattenLayerKV(Knews), FlattenLayerKV(Vnews), nil
+}

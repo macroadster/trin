@@ -1,0 +1,116 @@
+// v1.12 — multi-layer residual trit-attn decoder stack
+// Fixture: demos/weights/attn_stack.gguf (2 layers, dim=2 hidden=4)
+// Prepack Q/K/V/O/Up/Down once; run stack + manual block compose parity;
+// grow layer-major KV flats across tokens; scalar vs bitplane parity.
+
+fn main() {
+    let id = open_weight_session("demos/weights/attn_stack.gguf");
+    let x = [1.5, -0.5];
+    let empty = [];
+    let dim = 2;
+    let hidden = 4;
+    let bp = 1;
+    let eps = 0.000001;
+    let heads = 1;
+
+    // prepack: square matrices K=dim; downs K=hidden
+    let p1 = weight_session_prepack_trit_csv(id, "L0_q,L0_k,L0_v,L0_o,L1_q,L1_k,L1_v,L1_o,L0_up,L1_up", dim);
+    let p1d = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    let p2 = weight_session_prepack_trit_csv(id, "L0_q,L0_k,L0_v,L0_o,L1_q,L1_k,L1_v,L1_o,L0_up,L1_up", dim);
+    let p2d = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    println(str_concat("prepack_built=", to_str(p1[0] + p1d[0])));
+    println(str_concat("prepack_hits1=", to_str(p1[1] + p1d[1])));
+    println(str_concat("prepack_built2=", to_str(p2[0] + p2d[0])));
+    println(str_concat("prepack_hits2=", to_str(p2[1] + p2d[1])));
+    let packs = weight_session_has_trit_pack(id, "L0_q")
+        * weight_session_has_trit_pack(id, "L0_down")
+        * weight_session_has_trit_pack(id, "L1_q")
+        * weight_session_has_trit_pack(id, "L1_down");
+    println(str_concat("has_packs=", to_str(packs)));
+
+    // manual L0 block
+    let b0 = weight_session_forward_attn_block_trit(
+        id, "L0_q", "L0_k", "L0_v", "L0_o", "L0_up", "L0_down",
+        x, empty, empty, dim, hidden, "L0_an", "L0_fn", heads, 0.0, 0.0, bp, eps);
+    let y0 = b0[0];
+    let K0 = b0[1];
+    let V0 = b0[2];
+    println(str_concat("y0=", to_str(y0)));
+    println(str_concat("kv0_len=", to_str(len(K0))));
+
+    // stack both layers (no past)
+    let st = weight_session_attn_stack_trit(
+        id, "L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+        "L0_up,L1_up", "L0_down,L1_down",
+        x, empty, empty, dim, hidden, "L0_an,L1_an", "L0_fn,L1_fn",
+        heads, 0.0, 0.0, bp, eps);
+    let ys = st[0];
+    let Kf = st[1];
+    let Vf = st[2];
+    println(str_concat("ys=", to_str(ys)));
+    println(str_concat("kv_flat_len=", to_str(len(Kf))));
+
+    // compose L1 on top of y0
+    let b1 = weight_session_forward_attn_block_trit(
+        id, "L1_q", "L1_k", "L1_v", "L1_o", "L1_up", "L1_down",
+        y0, empty, empty, dim, hidden, "L1_an", "L1_fn", heads, 0.0, 0.0, bp, eps);
+    let y1m = b1[0];
+    let d0r = ys[0] - y1m[0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = ys[1] - y1m[1];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let stack_match = (d0 < 0.0001) * (d1 < 0.0001);
+    println(str_concat("stack_match=", to_str(stack_match)));
+
+    // flat KV: two layers × 1 token × dim
+    let flat_ok = (len(Kf) == 4) * (len(Vf) == 4);
+    println(str_concat("flat_ok=", to_str(flat_ok)));
+
+    // grow past (pos=1)
+    let st2 = weight_session_attn_stack_trit(
+        id, "L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+        "L0_up,L1_up", "L0_down,L1_down",
+        x, Kf, Vf, dim, hidden, "L0_an,L1_an", "L0_fn,L1_fn",
+        heads, 1.0, 0.0, bp, eps);
+    let y2 = st2[0];
+    let Kf2 = st2[1];
+    println(str_concat("y2=", to_str(y2)));
+    println(str_concat("kv_flat2_len=", to_str(len(Kf2))));
+    let grow_ok = (len(Kf2) == 8);
+    println(str_concat("grow_ok=", to_str(grow_ok)));
+
+    // scalar vs bitplane stack parity (same packs)
+    let sts = weight_session_attn_stack_trit(
+        id, "L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+        "L0_up,L1_up", "L0_down,L1_down",
+        x, empty, empty, dim, hidden, "L0_an,L1_an", "L0_fn,L1_fn",
+        heads, 0.0, 0.0, 0, eps);
+    let yss = sts[0];
+    let pdr0 = ys[0] - yss[0];
+    let pd0 = (pdr0 < 0.0) | (0.0 - pdr0) | pdr0;
+    let pdr1 = ys[1] - yss[1];
+    let pd1 = (pdr1 < 0.0) | (0.0 - pdr1) | pdr1;
+    let plane_ok = (pd0 < 0.0001) * (pd1 < 0.0001);
+    println(str_concat("plane_ok=", to_str(plane_ok)));
+
+    // packs still present after multi-call
+    let packs_after = weight_session_has_trit_pack(id, "L0_q")
+        * weight_session_has_trit_pack(id, "L1_down");
+    let p3a = weight_session_prepack_trit_csv(id, "L0_q,L0_k,L0_v,L0_o,L1_q,L1_k,L1_v,L1_o,L0_up,L1_up", dim);
+    let p3b = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    println(str_concat("packs_after=", to_str(packs_after)));
+    println(str_concat("prepack_after_hits=", to_str(p3a[1] + p3b[1])));
+
+    let hit_ok = (p1[0] + p1d[0] == 12) * (p2[0] + p2d[0] == 0)
+        * (p2[1] + p2d[1] == 12) * packs * packs_after
+        * (p3a[0] + p3b[0] == 0) * (p3a[1] + p3b[1] == 12);
+    let parity_ok = stack_match * plane_ok;
+    let decode_ok = flat_ok * grow_ok * (len(y0) == 2) * (len(ys) == 2);
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("decode_ok=", to_str(decode_ok)));
+    println(str_concat("weight_session_attn_stack_trit_ok=", to_str(hit_ok * parity_ok * decode_ok)));
+    println("weight_session_attn_stack_trit_ok");
+
+    close_weight_session(id);
+}

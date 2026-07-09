@@ -218,3 +218,36 @@ func TestTinyGGUFDecodeAttnTritDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionAttnStackTritDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/attn_stack.gguf")); err != nil {
+		t.Skip("missing demos/weights/attn_stack.gguf")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_attn_stack_trit.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_attn_stack_trit_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"decode_ok=1",
+		"stack_match=1",
+		"plane_ok=1",
+		"grow_ok=1",
+		"flat_ok=1",
+		"prepack_built=12",
+		"prepack_hits2=12",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

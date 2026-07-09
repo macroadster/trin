@@ -257,6 +257,8 @@ weight_session_mha(id, q,k,v, x, Kpast, Vpast, dIn, dOut, h [, o] [, pos] [, bas
 // v1.10 session-wired QKV + attn/mha on trit prepack cache
 weight_session_attn_proj_trit(id, q,k,v, x, dIn, dOut [, bitplane]) → [q,k,v]
 weight_session_attn_trit(id, q,k,v, x, Kpast, Vpast, dIn, dOut [, o] [, h] [, pos] [, base] [, bitplane]) → [y,K,V]
+weight_session_forward_attn_block_trit(id, q,k,v,o, up,down, x, Kpast,Vpast, dim, hidden [, attnGain] [, ffnGain] [, h] [, pos] [, base] [, bitplane] [, eps]) → [y,K,V]
+weight_session_attn_stack_trit(id, qCSV,kCSV,vCSV,oCSV, upCSV,downCSV, x, KpastFlat,VpastFlat, dim, hidden [, attnGainCSV] [, ffnGainCSV] [, h] [, pos] [, base] [, bitplane] [, eps]) → [y,Kflat,Vflat]
 weight_session_mha_trit(id, q,k,v, x, Kpast, Vpast, dIn, dOut, h [, o] [, pos] [, base] [, bitplane]) → [y,K,V]
 // v0.92 GQA packing + session-wired grouped-query attention
 gqa_expand_kv(kv, nTok, nKVHeads, nHeads, dh)
@@ -332,6 +334,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/weight_session_layer_stack_trit.trin` prepacks W0,W1 once and chains residual/plain RMSNorm blocks on the trit cache.
 `examples/weight_session_attn_trit.trin` prepacks Q/K/V/O once and runs growing-KV attn/mha on trit-cached projections.
 `examples/tiny_gguf_decode_attn_trit.trin` runs multi-token greedy decode with `weight_session_attn_trit` (+ FFN/lm_head on the same packs).
+`examples/weight_session_attn_stack_trit.trin` chains two residual trit-attn+FFN layers with growing layer-major KV flats.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -379,16 +382,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Trit residual stack on prepack cache (v1.09) | Square dim×dim layers; not full attn blocks |
 | Session attn on trit projections (v1.10) | Attention math f32; only projs use trit packs |
 | Tiny GGUF decode via trit-attn (v1.11) | Growing-KV session attn_trit + FFN/lm_head packs |
+| Multi-layer trit-attn stack (v1.12) | Residual attn+FFN layers, layer-major KV flats |
 
-### Acceptance (v1.11)
+### Acceptance (v1.12)
 
-- `go test` green (interp `tiny_gguf_decode_attn_trit` demo)
-- `bash scripts/e2e_native.sh` green including `tiny_gguf_decode_attn_trit`
-- `./trin run examples/tiny_gguf_decode_attn_trit.trin` shows `tiny_gguf_decode_attn_trit_ok` / `cache_hit_ok=1` / `parity_ok=1` / `match_trit_decode=1`
-- Prior v1.10 demos still pass (`weight_session_attn_trit_ok`)
+- `go test` green (weights AttnStackTrit + interp attn_stack_trit demo)
+- `bash scripts/e2e_native.sh` green including `weight_session_attn_stack_trit`
+- `./trin run examples/weight_session_attn_stack_trit.trin` shows `weight_session_attn_stack_trit_ok` / `cache_hit_ok=1` / `parity_ok=1` / `grow_ok=1`
+- Prior v1.11 demos still pass (`tiny_gguf_decode_attn_trit_ok`)
 
 ## Next
 
+- v1.12: multi-layer residual trit-attn decoder stack
 - v1.11: multi-token GGUF greedy decode on session trit-attn
 - v1.10: session-wired attn/MHA/GQA on trit-cached projections
 - v1.09: multi-layer residual stack on trit-cached linears
@@ -400,5 +405,5 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; multi-layer trit-attn decoder
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; multi-layer GGUF decode loop on attn stack
 

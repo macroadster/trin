@@ -706,7 +706,7 @@ kernels, KV growth, deterministic sampling, CSV + GGUF/safetensors (incl. common
 block quants, full IQ1/IQ2/IQ3 families + IQ4_NL/XS + TQ1_0/TQ2_0, mmap open,
 retained sessions, windowed partial decode, tiled session matvec, fused quant
 linear, multi-layer residual stack, session-wired multi-head attention, GQA
-packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + portable kernels + PTX emitters + offline ptxas cubin + host buffer stubs. Tokenizer + GGUF session decode (v1.04). SIMD trit matvec + local BPE sidecar (v1.05). Session packed trit linear (v1.06). Session trit prepack cache (v1.07). Tiny GGUF decode via trit cache (v1.08). Trit residual layer stack (v1.09). Session attn/MHA/GQA on trit projections (v1.10). Tiny GGUF decode via session trit-attn (v1.11). Out of scope: multi-GPU, competitive tok/s, live driver launch, HF sentencepiece protobuf, network fetch.
+packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + portable kernels + PTX emitters + offline ptxas cubin + host buffer stubs. Tokenizer + GGUF session decode (v1.04). SIMD trit matvec + local BPE sidecar (v1.05). Session packed trit linear (v1.06). Session trit prepack cache (v1.07). Tiny GGUF decode via trit cache (v1.08). Trit residual layer stack (v1.09). Session attn/MHA/GQA on trit projections (v1.10). Tiny GGUF decode via session trit-attn (v1.11). Multi-layer residual trit-attn decoder stack (v1.12). Out of scope: multi-GPU, competitive tok/s, live driver launch, HF sentencepiece protobuf, network fetch.
 
 - **1.01** — loop/for surface sugar: `when g do e`, `over xs as x do e`, `for x in xs do e` desugar to ternary/map; `range` half-open i32 span builtin; Go + interpreter parity demo `examples/loop_sugar.trin`
 - **1.04** — char/token table tokenizer (`open_vocab`/`vocab_encode`/`vocab_decode`/`load_text`) + multi-tensor `tiny_llm.gguf` session greedy decode demo; CUDA device launch still deferred
@@ -717,3 +717,4 @@ packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + 
 - **1.09** — multi-layer residual trit stack: `weight_session_forward_block_trit` / `weight_session_layer_stack_trit` / `weight_session_prepack_trit_csv` on shared prepack cache
 - **1.10** — session attn/MHA/GQA on trit packs: `weight_session_attn_trit` / `mha_trit` / `gqa_trit` + proj variants; projections cached, attention f32
 - **1.11** — multi-token GGUF greedy decode on trit-attn: prepack QKV/O/FFN/lm_head once, `weight_session_attn_trit` growing KV + RoPE, tokens match v1.08 trit decode
+- **1.12** — multi-layer residual trit-attn stack: `forward_attn_block_trit` / `attn_stack_trit` with layer-major KV flats, SiLU FFN, shared prepack cache

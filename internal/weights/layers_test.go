@@ -296,3 +296,226 @@ func TestLayerStackTritParityAndCache(t *testing.T) {
 		t.Fatal("bad dim")
 	}
 }
+
+func TestAttnStackTritParityAndGrow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "attn_stack.gguf")
+	// 2 residual layers, dim=2, hidden=4 — shared identity-ish shapes.
+	dim, hidden := 2, 4
+	I2 := []float32{1, 0, 0, 1}
+	K0 := []float32{1, 0.1, 0, 1}
+	V0 := []float32{0.8, 0, 0, 0.8}
+	// up: hidden×dim = 4×2
+	Up0 := []float32{
+		1, 0,
+		0, 1,
+		0.5, 0.5,
+		0, 0.5,
+	}
+	// down: dim×hidden = 2×4
+	Down0 := []float32{
+		1, 0, 0.5, 0,
+		0, 1, 0, 0.5,
+	}
+	// layer1 slight scale
+	Q1 := []float32{0.9, 0, 0, 0.9}
+	K1 := []float32{1, 0, 0.1, 1}
+	V1 := []float32{0.7, 0, 0, 0.7}
+	O1 := []float32{1, 0, 0, 1}
+	Up1 := []float32{
+		0.8, 0,
+		0, 0.8,
+		0.4, 0.4,
+		0, 0.4,
+	}
+	Down1 := []float32{
+		0.9, 0, 0.4, 0,
+		0, 0.9, 0, 0.4,
+	}
+	g := []float32{1, 1}
+	tensors := map[string][]float32{
+		"L0_q": Q1, "L0_k": K0, "L0_v": V0, "L0_o": I2,
+		"L0_up": Up0, "L0_down": Down0, "L0_an": g, "L0_fn": g,
+		"L1_q": Q1, "L1_k": K1, "L1_v": V1, "L1_o": O1,
+		"L1_up": Up1, "L1_down": Down1, "L1_an": g, "L1_fn": g,
+	}
+	// fix L0_q identity
+	tensors["L0_q"] = I2
+	shapes := map[string][]uint64{
+		"L0_q": {2, 2}, "L0_k": {2, 2}, "L0_v": {2, 2}, "L0_o": {2, 2},
+		"L0_up": {4, 2}, "L0_down": {2, 4}, "L0_an": {2}, "L0_fn": {2},
+		"L1_q": {2, 2}, "L1_k": {2, 2}, "L1_v": {2, 2}, "L1_o": {2, 2},
+		"L1_up": {4, 2}, "L1_down": {2, 4}, "L1_an": {2}, "L1_fn": {2},
+	}
+	if err := WriteGGUFF32(path, tensors, shapes, map[string]string{"general.name": "attn-stack"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+
+	x := []float32{1.5, -0.5}
+	eps := 1e-6
+	// prepack all matrices (K = in features)
+	built, hits, err := s.PrepackTritCSV("L0_q,L0_k,L0_v,L0_o,L1_q,L1_k,L1_v,L1_o", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built != 8 || hits != 0 {
+		t.Fatalf("attn packs built=%d hits=%d", built, hits)
+	}
+	bUp, hUp, err := s.PrepackTritCSV("L0_up,L1_up", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bUp != 2 || hUp != 0 {
+		t.Fatalf("up packs built=%d hits=%d", bUp, hUp)
+	}
+	bDn, hDn, err := s.PrepackTritCSV("L0_down,L1_down", hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bDn != 2 || hDn != 0 {
+		t.Fatalf("down packs built=%d hits=%d", bDn, hDn)
+	}
+	// second prepack all hits
+	b2, h2, err := s.PrepackTritCSV("L0_q,L0_k,L0_v,L0_o,L0_up,L1_q,L1_k,L1_v,L1_o,L1_up", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2 != 0 || h2 != 10 {
+		t.Fatalf("second pack built=%d hits=%d", b2, h2)
+	}
+
+	// manual one-layer compose matches ForwardAttnBlockTrit
+	manual := func(spec AttnLayerSpec, xin, kp, vp []float32, pos float64, bp bool) ([]float32, []float32, []float32) {
+		ag, err := s.loadGain(spec.AttnGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		xn := RMSNormF32(xin, eps, ag)
+		a, kn, vn, err := s.SessionAttnTrit(spec.Q, spec.K, spec.V, spec.O, xn, kp, vp, dim, dim, 1, pos, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			h[i] = xin[i] + a[i]
+		}
+		fg, err := s.loadGain(spec.FFNGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hn := RMSNormF32(h, eps, fg)
+		up, _, err := s.LinearTritCached(spec.Up, hn, hidden, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		act := SiLUF32(up)
+		down, _, err := s.LinearTritCached(spec.Down, act, dim, hidden, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			y[i] = h[i] + down[i]
+		}
+		return y, kn, vn
+	}
+	l0 := AttnLayerSpec{Q: "L0_q", K: "L0_k", V: "L0_v", O: "L0_o", AttnGain: "L0_an", FFNGain: "L0_fn", Up: "L0_up", Down: "L0_down", Hidden: hidden}
+	l1 := AttnLayerSpec{Q: "L1_q", K: "L1_k", V: "L1_v", O: "L1_o", AttnGain: "L1_an", FFNGain: "L1_fn", Up: "L1_up", Down: "L1_down", Hidden: hidden}
+
+	for _, bp := range []bool{false, true} {
+		y0m, k0, v0 := manual(l0, x, nil, nil, 0, bp)
+		y0, k0b, v0b, err := s.ForwardAttnBlockTrit(l0, x, nil, nil, dim, 1, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y0m {
+			if !near(y0m[i], y0[i]) {
+				t.Fatalf("block0 bp=%v i=%d %v vs %v", bp, i, y0m[i], y0[i])
+			}
+		}
+		if len(k0) != len(k0b) || len(v0) != len(v0b) {
+			t.Fatalf("kv0 len")
+		}
+		y1m, k1, v1 := manual(l1, y0m, nil, nil, 0, bp)
+		ys, kns, vns, err := s.AttnStackTrit([]AttnLayerSpec{l0, l1}, x, nil, nil, dim, 1, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y1m {
+			if !near(y1m[i], ys[i]) {
+				t.Fatalf("stack bp=%v i=%d %v vs %v", bp, i, y1m[i], ys[i])
+			}
+		}
+		if len(kns) != 2 || len(vns) != 2 {
+			t.Fatalf("stack kv parts")
+		}
+		if len(kns[0]) != len(k0) || len(kns[1]) != len(k1) {
+			t.Fatalf("stack kv sizes")
+		}
+		// grow past
+		ys2, kns2, _, err := s.AttnStackTrit([]AttnLayerSpec{l0, l1}, x, kns, vns, dim, 1, 1, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(kns2[0]) != 2*dim || len(kns2[1]) != 2*dim {
+			t.Fatalf("grow want 2 toks/layer got %d %d", len(kns2[0])/dim, len(kns2[1])/dim)
+		}
+		if len(ys2) != dim {
+			t.Fatalf("y2 len")
+		}
+		// CSV surface + flat KV roundtrip
+		yCSV, kFlat, vFlat, err := s.AttnStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_up,L1_up", "L0_down,L1_down", "L0_an,L1_an", "L0_fn,L1_fn",
+			x, nil, nil, dim, hidden, 1, 0, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ys {
+			if !near(ys[i], yCSV[i]) {
+				t.Fatalf("csv y bp=%v i=%d", bp, i)
+			}
+		}
+		if len(kFlat) != 2*dim || len(vFlat) != 2*dim {
+			// two layers × 1 token × dim
+			t.Fatalf("flat kv len %d %d", len(kFlat), len(vFlat))
+		}
+		parts, err := SplitLayerKV(kFlat, 2, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(parts[0]) != dim || len(parts[1]) != dim {
+			t.Fatalf("split lens")
+		}
+		// grow via CSV flat
+		_, kFlat2, _, err := s.AttnStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_up,L1_up", "L0_down,L1_down", "L0_an,L1_an", "L0_fn,L1_fn",
+			x, kFlat, vFlat, dim, hidden, 1, 1, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(kFlat2) != 4*dim {
+			t.Fatalf("flat grow want %d got %d", 4*dim, len(kFlat2))
+		}
+		_ = k1
+		_ = v1
+	}
+
+	if !s.HasTritPack("L0_q") || !s.HasTritPack("L1_down") {
+		t.Fatal("packs dropped")
+	}
+	if _, _, _, err := s.AttnStackTritCSV("", "", "", "", "", "", "", "", x, nil, nil, dim, hidden, 1, 0, 0, true, eps); err == nil {
+		t.Fatal("empty layers")
+	}
+	if _, _, _, err := s.AttnStackTritCSV("L0_q", "L0_k", "L0_v", "L0_o", "L0_up", "L0_down", "", "", x, nil, nil, 99, hidden, 1, 0, 0, true, eps); err == nil {
+		t.Fatal("bad dim")
+	}
+}

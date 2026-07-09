@@ -10135,6 +10135,126 @@ func (it *Interpreter) installBuiltins() {
 		return Span([]Value{I32(built), I32(hits)}), nil
 	})
 
+	// weight_session_forward_attn_block_trit(id, q,k,v,o, up,down, x, Kpast,Vpast, dim, hidden
+	//   [, attnGain] [, ffnGain] [, h] [, pos] [, base] [, bitplane] [, eps]) → [y,K,V]
+	// One residual transformer layer on trit-cached QKV/O + FFN (v1.12).
+	nat("weight_session_forward_attn_block_trit", func(args []Value) (Value, error) {
+		if len(args) < 12 || args[7].Kind != VSpan || args[8].Kind != VSpan || args[9].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_forward_attn_block_trit(id, q,k,v,o, up,down, x, Kpast,Vpast, dim, hidden [, attnGain] [, ffnGain] [, h] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_attn_block_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		spec := weights.AttnLayerSpec{
+			Q: strArg(args[1]), K: strArg(args[2]), V: strArg(args[3]), O: strArg(args[4]),
+			Up: strArg(args[5]), Down: strArg(args[6]),
+			Hidden: args[11].AsInt(),
+		}
+		x := toF32(args[7].Span)
+		Kp := toF32(args[8].Span)
+		Vp := toF32(args[9].Span)
+		dim := args[10].AsInt()
+		h := 1
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 13 {
+			spec.AttnGain = strArg(args[12])
+		}
+		if len(args) >= 14 {
+			spec.FFNGain = strArg(args[13])
+		}
+		if len(args) >= 15 {
+			h = args[14].AsInt()
+		}
+		if len(args) >= 16 {
+			pos = args[15].AsFloat()
+		}
+		if len(args) >= 17 {
+			base = args[16].AsFloat()
+		}
+		if len(args) >= 18 {
+			bitplane = args[17].AsFloat() != 0 || args[17].AsInt() != 0
+		}
+		if len(args) >= 19 {
+			eps = args[18].AsFloat()
+		}
+		y, kn, vn, err := s.ForwardAttnBlockTrit(spec, x, Kp, Vp, dim, h, pos, base, bitplane, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_attn_block_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
+	// weight_session_attn_stack_trit(id, qCSV,kCSV,vCSV,oCSV, upCSV,downCSV, x, KpastFlat,VpastFlat,
+	//   dim, hidden [, attnGainCSV] [, ffnGainCSV] [, h] [, pos] [, base] [, bitplane] [, eps]) → [y,Kflat,Vflat]
+	// Multi-layer residual trit-attn stack with layer-major KV flats (v1.12).
+	nat("weight_session_attn_stack_trit", func(args []Value) (Value, error) {
+		if len(args) < 13 || args[7].Kind != VSpan || args[8].Kind != VSpan || args[9].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_attn_stack_trit(id, qCSV,kCSV,vCSV,oCSV, upCSV,downCSV, x, KpastFlat,VpastFlat, dim, hidden [, attnGainCSV] [, ffnGainCSV] [, h] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_stack_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[7].Span)
+		Kp := toF32(args[8].Span)
+		Vp := toF32(args[9].Span)
+		dim, hidden := args[10].AsInt(), args[11].AsInt()
+		attnGainCSV, ffnGainCSV := "", ""
+		h := 1
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		// required through hidden @11; optionals: attnGain, ffnGain, h, pos, base, bitplane, eps
+		if len(args) >= 13 {
+			attnGainCSV = strArg(args[12])
+		}
+		if len(args) >= 14 {
+			ffnGainCSV = strArg(args[13])
+		}
+		if len(args) >= 15 {
+			h = args[14].AsInt()
+		}
+		if len(args) >= 16 {
+			pos = args[15].AsFloat()
+		}
+		if len(args) >= 17 {
+			base = args[16].AsFloat()
+		}
+		if len(args) >= 18 {
+			bitplane = args[17].AsFloat() != 0 || args[17].AsInt() != 0
+		}
+		if len(args) >= 19 {
+			eps = args[18].AsFloat()
+		}
+		y, kn, vn, err := s.AttnStackTritCSV(
+			strArg(args[1]), strArg(args[2]), strArg(args[3]), strArg(args[4]),
+			strArg(args[5]), strArg(args[6]),
+			attnGainCSV, ffnGainCSV,
+			x, Kp, Vp, dim, hidden, h, pos, base, bitplane, eps,
+		)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_stack_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
 	// weight_session_linear_fused(id, name, x, M, K [, tileRows]) → span[f32] (v0.89 block-stream)
 	nat("weight_session_linear_fused", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

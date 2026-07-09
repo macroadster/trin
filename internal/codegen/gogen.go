@@ -9767,6 +9767,189 @@ func (s *weightSess) prepackTritCSV(wCSV string, K int) (built, hits int, err er
 	return built, hits, nil
 }
 
+// --- v1.12 multi-layer trit-attn decoder stack (codegen runtime) ---
+
+func siLUF32(x []float32) []float32 {
+	out := make([]float32, len(x))
+	for i, v := range x {
+		f := float64(v)
+		out[i] = float32(f / (1.0 + math.Exp(-f)))
+	}
+	return out
+}
+
+func flattenLayerKV(parts [][]float32) []float32 {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]float32, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func splitLayerKV(flat []float32, nLayers, d int) ([][]float32, error) {
+	if nLayers <= 0 {
+		return nil, fmt.Errorf("split_layer_kv: bad nLayers")
+	}
+	if d <= 0 {
+		return nil, fmt.Errorf("split_layer_kv: bad d")
+	}
+	out := make([][]float32, nLayers)
+	if len(flat) == 0 {
+		return out, nil
+	}
+	if len(flat)%(nLayers*d) != 0 {
+		return nil, fmt.Errorf("split_layer_kv: flat len %d not multiple of nLayers*d=%d", len(flat), nLayers*d)
+	}
+	nTok := len(flat) / (nLayers * d)
+	step := nTok * d
+	for i := 0; i < nLayers; i++ {
+		base := i * step
+		out[i] = flat[base : base+step]
+	}
+	return out, nil
+}
+
+// forwardAttnBlockTrit: residual attn+FFN on trit packs.
+func (s *weightSess) forwardAttnBlockTrit(
+	qName, kName, vName, oName, upName, downName, attnGain, ffnGain string,
+	x, Kpast, Vpast []float32,
+	dim, hidden, h int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: bad dim")
+	}
+	if qName == "" || kName == "" || vName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: Q/K/V required")
+	}
+	if upName == "" || downName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: FFN Up/Down required")
+	}
+	if hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_attn_block_trit: hidden must be > 0")
+	}
+	if h <= 0 {
+		h = 1
+	}
+	xIn := x[:dim]
+	ag, err := s.loadGain(attnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	xn := rmsNormF32(xIn, eps, ag)
+	a, Knew, Vnew, err := s.sessionAttnTrit(qName, kName, vName, oName, xn, Kpast, Vpast, dim, dim, h, pos, base, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	fg, err := s.loadGain(ffnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	hn := rmsNormF32(hRes, eps, fg)
+	up, _, err := s.linearTritCached(upName, hn, hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	act := siLUF32(up)
+	down, _, err := s.linearTritCached(downName, act, dim, hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+func (s *weightSess) attnStackTritCSV(
+	qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, heads int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	split := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	qs := split(qCSV)
+	ks := split(kCSV)
+	vs := split(vCSV)
+	os_ := split(oCSV)
+	ups := split(upCSV)
+	downs := split(downCSV)
+	ag := split(attnGainCSV)
+	fg := split(ffnGainCSV)
+	n := len(qs)
+	if n == 0 || len(ks) != n || len(vs) != n || len(ups) != n || len(downs) != n {
+		return nil, nil, nil, fmt.Errorf("attn_stack_trit: Q/K/V/Up/Down CSVs must share non-zero length")
+	}
+	Kpasts, err := splitLayerKV(KpastFlat, n, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := splitLayerKV(VpastFlat, n, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("attn_stack_trit: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews := make([][]float32, n)
+	Vnews := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		oName, aGain, fGain := "", "", ""
+		if i < len(os_) {
+			oName = os_[i]
+		}
+		if i < len(ag) {
+			aGain = ag[i]
+		}
+		if i < len(fg) {
+			fGain = fg[i]
+		}
+		next, kn, vn, e := s.forwardAttnBlockTrit(
+			qs[i], ks[i], vs[i], oName, ups[i], downs[i], aGain, fGain,
+			cur, Kpasts[i], Vpasts[i], dim, hidden, heads, pos, base, bitplane, eps,
+		)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("attn_stack_trit layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, flattenLayerKV(Knews), flattenLayerKV(Vnews), nil
+}
+
 
 // --- v0.92 GQA packing ---
 func gqaExpandKV(kv []float32, nTok, nKVHeads, nHeads, dh int) ([]float32, error) {
@@ -11210,6 +11393,112 @@ func biWeightSessionPrepackTritCSV(id, wCSV, Kv val) val {
 		os.Exit(1)
 	}
 	return vSpan([]val{vI32(built), vI32(hits)})
+}
+
+// --- v1.12 language bindings: forward_attn_block_trit / attn_stack_trit ---
+
+func biWeightSessionForwardAttnBlockTrit(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, vStr(""), vStr(""), vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritG(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, vStr(""), vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritGF(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritGFH(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritGFHP(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritGFHPB(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, base val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, base, vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritGFHPBB(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, base, bp val) val {
+	return biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, base, bp, vF32(1e-6))
+}
+func biWeightSessionForwardAttnBlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, attnGain, ffnGain, h, pos, base, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_attn_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.forwardAttnBlockTrit(
+		fmtVal(qn), fmtVal(kn), fmtVal(vn), fmtVal(on), fmtVal(up), fmtVal(down),
+		fmtVal(attnGain), fmtVal(ffnGain),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(h), asF(pos), asF(base), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_attn_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
+func biWeightSessionAttnStackTrit(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, vStr(""), vStr(""), vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritG(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, vStr(""), vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritGF(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, vI32(1), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritGFH(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritGFHP(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritGFHPB(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, base val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, base, vI32(0), vF32(1e-6))
+}
+func biWeightSessionAttnStackTritGFHPBB(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, base, bp val) val {
+	return biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, base, bp, vF32(1e-6))
+}
+func biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, attnGainCSV, ffnGainCSV, h, pos, base, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.attnStackTritCSV(
+		fmtVal(qCSV), fmtVal(kCSV), fmtVal(vCSV), fmtVal(oCSV),
+		fmtVal(upCSV), fmtVal(downCSV), fmtVal(attnGainCSV), fmtVal(ffnGainCSV),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(h), asF(pos), asF(base), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
 }
 
 func biWeightSessionLinearFused(id, name, x, Mv, Kv val) val {
@@ -14560,6 +14849,44 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 		}
 	case "weight_session_prepack_trit_csv":
 		fmt.Fprintf(g.b, "\t%s := biWeightSessionPrepackTritCSV(%s, %s, %s)\n", tmp, args[0], args[1], args[2])
+	case "weight_session_forward_attn_block_trit":
+		switch len(args) {
+		case 12:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+		case 13:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+		case 14:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		case 15:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritGFH(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritGFHP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritGFHPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritGFHPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardAttnBlockTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		}
+	case "weight_session_attn_stack_trit":
+		switch len(args) {
+		case 12:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+		case 13:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+		case 14:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		case 15:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGFH(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGFHP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGFHPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGFHPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		}
 	case "load_gguf_window":
 		fmt.Fprintf(g.b, "\t%s := biLoadGgufWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
 	case "load_safetensors_window":
