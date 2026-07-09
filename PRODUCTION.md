@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.07.0-go  
+**Version:** 1.08.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08).
 
 ## What is production-ready
 
@@ -24,7 +24,8 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 23. **SIMD trit matvec + BPE sidecar (v1.05)** — packed set-bit `linear_trit` bitplane path + `open_bpe` / `bpe_encode` local merges
 24. **Session packed trit linear (v1.06)** — `weight_session_linear_trit` / `_tile` / `load_gguf_linear_trit`: GGUF/safetensors row tiles → absmean trit → scalar or bitplane matvec; microbench scripts report both paths
 25. **Session trit prepack cache (v1.07)** — `weight_session_prepack_trit` / `weight_session_linear_trit_cached`: whole-tensor absmean + packed planes retained on the session; hit path skips re-quant/re-pack
-26–28. Linear trit, transformer cores, KV/sample, toolchain, verification
+26. **Tiny GGUF decode via trit cache (v1.08)** — `examples/tiny_gguf_decode_trit.trin` prepacks Q/K/V/O/FFN/lm_head once and reuses packs across tokens
+27–29. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -152,6 +153,16 @@ Note: per-tile absmean scale is independent when `tileRows < M`; compare free-sp
 Demo: `examples/weight_session_trit_cache.trin` (`cache_hit_ok=1`, `parity_ok=1`).
 Cache cleared on `close_weight_session`. Full-tensor scale matches `weight_session_linear_trit(..., tileRows=M)`.
 
+## Tiny GGUF decode via trit cache (v1.08)
+
+`examples/tiny_gguf_decode_trit.trin` opens `demos/weights/tiny_llm.gguf`, prepacks each linear tensor once (`attn_q/k/v/o`, `ffn_up/down`, `lm_head`), then runs prompt `"AB"` + 3 greedy tokens with `weight_session_linear_trit_cached` + KV append. Checks:
+- first prepack build / second hit per layer
+- uncached full-tile parity vs cached packed
+- packs retained across multi-token reuse
+- decode completes with growing KV
+
+Note: greedy tokens may differ from fused-f32 `tiny_gguf_decode.trin` because absmean trit quantizes projections — this path proves cache reuse + self-parity, not token identity with f32 fused decode.
+
 ## Limits
 
 - CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
@@ -185,6 +196,9 @@ Cache cleared on `close_weight_session`. Full-tensor scale matches `weight_sessi
 - [x] Session trit prepack cache + cached matvec
 - [x] Demo `weight_session_trit_cache` (hit + parity)
 - [x] Version `1.07.0-go`
+- [x] Tiny GGUF decode wired through trit cache
+- [x] Demo `tiny_gguf_decode_trit` (hit + parity + decode)
+- [x] Version `1.08.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -198,6 +212,7 @@ go test ./internal/cuda ./internal/parser ./internal/interp ./internal/weights -
 go run scripts/gen_tiny_llm_gguf.go .
 ./trin run examples/vocab_table.trin
 ./trin run examples/tiny_gguf_decode.trin
+./trin run examples/tiny_gguf_decode_trit.trin
 ./trin run examples/linear_trit_simd.trin
 ./trin run examples/bpe_sidecar.trin
 go run scripts/gen_trit_session_fixture.go .

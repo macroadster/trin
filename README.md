@@ -316,6 +316,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/weight_session_linear_trit.trin` loads `trit_session.gguf` and runs session-backed scalar vs bitplane trit matvec.
 `examples/linear_trit_bench.trin` hammers free-span scalar vs planes for wall-time measurement.
 `examples/weight_session_trit_cache.trin` prepacks once, hits cache, and checks cached scalar/planes parity.
+`examples/tiny_gguf_decode_trit.trin` prepacks tiny_llm linears once and runs multi-token decode on the hit path.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -359,16 +360,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | BPE sidecar `open_bpe` / merges file (local ranks, v1.05) | Full HF sentencepiece proto & network fetch out of scope |
 | Session `weight_session_linear_trit` GGUF→absmean→scalar/bitplane (v1.06) | Per-tile absmean ≠ full-tensor quant when tileRows < M |
 | Session trit prepack cache + `linear_trit_cached` (v1.07) | Cache is process-local; dropped on close |
+| Tiny GGUF decode via trit cache (v1.08) | Trit quant tokens may differ from fused-f32 decode |
 
-### Acceptance (v1.07)
+### Acceptance (v1.08)
 
-- `go test` green (weights prepack/cache + packed-plane microbench; interp trit cache demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_trit_cache`
-- `./trin run examples/weight_session_trit_cache.trin` shows `weight_session_trit_cache_ok` / `cache_hit_ok=1` / `parity_ok=1`
-- Prior v1.06 demos still pass (`weight_session_linear_trit_ok`, `linear_trit_bench_ok`)
+- `go test` green (interp tiny_gguf_decode_trit demo; prior prepack cache tests)
+- `bash scripts/e2e_native.sh` green including `tiny_gguf_decode_trit`
+- `./trin run examples/tiny_gguf_decode_trit.trin` shows `tiny_gguf_decode_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
+- Prior v1.07 demos still pass (`weight_session_trit_cache_ok`)
 
 ## Next
 
+- v1.08: wire cached trit linear into tiny GGUF decode
 - v1.07: session trit prepack cache (skip re-quant/re-pack on repeated matvec)
 - v1.06: session-backed packed trit linear + microbench
 - v1.05: packed bitplane `linear_trit` throughput path + local BPE sidecar merges loader
@@ -376,5 +379,5 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; wire cached trit linear into tiny GGUF decode
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; multi-layer residual stack on trit-cached linears
 
