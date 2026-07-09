@@ -9983,6 +9983,86 @@ func (it *Interpreter) installBuiltins() {
 		}
 		return f32SliceToSpan(y), nil
 	})
+	// weight_session_linear_trit(id, name, x, M, K [, tileRows [, bitplane]])
+	// → [y:span f32, scale:f32]  session load → absmean trit → matvec (v1.06)
+	nat("weight_session_linear_trit", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_linear_trit(id, name, x, M, K [, tileRows [, bitplane]])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		tile := 0
+		bitplane := false
+		if len(args) >= 6 {
+			tile = args[5].AsInt()
+		}
+		if len(args) >= 7 {
+			bitplane = args[6].AsFloat() != 0 || args[6].AsInt() != 0
+		}
+		y, scale, err := s.LinearTrit(strArg(args[1]), x, M, K, tile, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
+	})
+	// weight_session_linear_trit_tile(id, name, x, K, row0, nRows [, bitplane]) → [y, scale]
+	nat("weight_session_linear_trit_tile", func(args []Value) (Value, error) {
+		if len(args) < 6 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_linear_trit_tile(id, name, x, K, row0, nRows [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit_tile: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		K, row0, nRows := args[3].AsInt(), args[4].AsInt(), args[5].AsInt()
+		bitplane := false
+		if len(args) >= 7 {
+			bitplane = args[6].AsFloat() != 0 || args[6].AsInt() != 0
+		}
+		y, scale, err := s.LinearTritRows(strArg(args[1]), x, K, row0, nRows, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit_tile: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
+	})
+	// load_gguf_linear_trit(path, name, x, M, K [, tileRows [, bitplane]]) → [y, scale]
+	nat("load_gguf_linear_trit", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "load_gguf_linear_trit(path, name, x, M, K [, tileRows [, bitplane]])"}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		tile := 0
+		bitplane := false
+		if len(args) >= 6 {
+			tile = args[5].AsInt()
+		}
+		if len(args) >= 7 {
+			bitplane = args[6].AsFloat() != 0 || args[6].AsInt() != 0
+		}
+		y, scale, err := weights.LinearTritGGUF(strArg(args[0]), strArg(args[1]), x, M, K, tile, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "load_gguf_linear_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
+	})
 	// load_gguf_linear(path, name, x, M, K [, tileRows]) one-shot
 	nat("load_gguf_linear", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

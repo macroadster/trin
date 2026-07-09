@@ -10044,6 +10044,234 @@ func (s *weightSess) linear(name string, x []float32, M, K, tileRows int) ([]flo
 	return out, nil
 }
 
+func quantizeAbsMeanTritsF32(w []float32) (trits []int8, scale float32) {
+	n := len(w)
+	if n == 0 {
+		return []int8{}, 0
+	}
+	var sumAbs float64
+	for _, v := range w {
+		if v < 0 {
+			sumAbs -= float64(v)
+		} else {
+			sumAbs += float64(v)
+		}
+	}
+	scale64 := sumAbs / float64(n)
+	scale = float32(scale64)
+	trits = make([]int8, n)
+	if scale64 == 0 {
+		return trits, 0
+	}
+	for i, v := range w {
+		r := float64(v) / scale64
+		if r >= 0.5 {
+			trits[i] = 1
+		} else if r <= -0.5 {
+			trits[i] = -1
+		}
+	}
+	return trits, scale
+}
+
+func linearTritScalarF32(W []int8, x []float32, M, K int, scale float32) []float32 {
+	out := make([]float32, M)
+	if M <= 0 || K <= 0 {
+		return out
+	}
+	for i := 0; i < M; i++ {
+		base := i * K
+		var acc float64
+		t := 0
+		for ; t+4 <= K; t += 4 {
+			acc += float64(W[base+t]) * float64(x[t])
+			acc += float64(W[base+t+1]) * float64(x[t+1])
+			acc += float64(W[base+t+2]) * float64(x[t+2])
+			acc += float64(W[base+t+3]) * float64(x[t+3])
+		}
+		for ; t < K; t++ {
+			acc += float64(W[base+t]) * float64(x[t])
+		}
+		out[i] = scale * float32(acc)
+	}
+	return out
+}
+
+func packInt8WordsF32(row []int8) (pos, neg []uint32) {
+	n := len(row)
+	nw := (n + 31) / 32
+	if nw == 0 {
+		return []uint32{}, []uint32{}
+	}
+	pos = make([]uint32, nw)
+	neg = make([]uint32, nw)
+	for i, t := range row {
+		w, b := i/32, uint(i%32)
+		if t > 0 {
+			pos[w] |= 1 << b
+		} else if t < 0 {
+			neg[w] |= 1 << b
+		}
+	}
+	return pos, neg
+}
+
+func mixedWordF32(pos, neg []uint32, x []float32, w, n, nw int) float64 {
+	var mask uint32 = 0xffffffff
+	if w == nw-1 && n%32 != 0 {
+		mask = (uint32(1) << uint(n%32)) - 1
+	}
+	var p, g uint32
+	if w < len(pos) {
+		p = pos[w] & mask
+	}
+	if w < len(neg) {
+		g = neg[w] & mask
+	}
+	base := w * 32
+	var acc float64
+	for p != 0 {
+		b := bits.TrailingZeros32(p)
+		idx := base + b
+		if idx < len(x) {
+			acc += float64(x[idx])
+		}
+		p &^= 1 << uint(b)
+	}
+	for g != 0 {
+		b := bits.TrailingZeros32(g)
+		idx := base + b
+		if idx < len(x) {
+			acc -= float64(x[idx])
+		}
+		g &^= 1 << uint(b)
+	}
+	return acc
+}
+
+func mixedDotPlanesF32(pos, neg []uint32, x []float32, n, nw int) float64 {
+	if n <= 0 || nw <= 0 {
+		return 0
+	}
+	var acc float64
+	w := 0
+	for ; w+4 <= nw; w += 4 {
+		acc += mixedWordF32(pos, neg, x, w, n, nw)
+		acc += mixedWordF32(pos, neg, x, w+1, n, nw)
+		acc += mixedWordF32(pos, neg, x, w+2, n, nw)
+		acc += mixedWordF32(pos, neg, x, w+3, n, nw)
+	}
+	for ; w+2 <= nw; w += 2 {
+		acc += mixedWordF32(pos, neg, x, w, n, nw)
+		acc += mixedWordF32(pos, neg, x, w+1, n, nw)
+	}
+	for ; w < nw; w++ {
+		acc += mixedWordF32(pos, neg, x, w, n, nw)
+	}
+	return acc
+}
+
+func linearTritPlanesF32(W []int8, x []float32, M, K int, scale float32) []float32 {
+	out := make([]float32, M)
+	if M <= 0 || K <= 0 {
+		return out
+	}
+	nw := (K + 31) / 32
+	for i := 0; i < M; i++ {
+		pos, neg := packInt8WordsF32(W[i*K : i*K+K])
+		acc := mixedDotPlanesF32(pos, neg, x, K, nw)
+		out[i] = scale * float32(acc)
+	}
+	return out
+}
+
+func (s *weightSess) linearTritRows(name string, x []float32, K, row0, nRows int, bitplane bool) ([]float32, float32, error) {
+	if s == nil {
+		return nil, 0, fmt.Errorf("nil session")
+	}
+	if K <= 0 || nRows <= 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: bad K/nRows")
+	}
+	if len(x) < K {
+		return nil, 0, fmt.Errorf("linear_trit_rows: x short")
+	}
+	if row0 < 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: negative row0")
+	}
+	sh, err := s.shape(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	nElem := 1
+	for _, d := range sh {
+		if d <= 0 {
+			return nil, 0, fmt.Errorf("zero dim")
+		}
+		nElem *= int(d)
+	}
+	if nElem%K != 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: nElem not divisible by K")
+	}
+	M := nElem / K
+	if row0+nRows > M {
+		return nil, 0, fmt.Errorf("linear_trit_rows OOB")
+	}
+	wF, err := s.loadF32Window(name, row0*K, nRows*K)
+	if err != nil {
+		return nil, 0, err
+	}
+	W, scale := quantizeAbsMeanTritsF32(wF)
+	var y []float32
+	if bitplane {
+		y = linearTritPlanesF32(W, x[:K], nRows, K, scale)
+	} else {
+		y = linearTritScalarF32(W, x[:K], nRows, K, scale)
+	}
+	return y, scale, nil
+}
+
+func (s *weightSess) linearTrit(name string, x []float32, M, K, tileRows int, bitplane bool) ([]float32, float32, error) {
+	if M <= 0 || K <= 0 {
+		return nil, 0, fmt.Errorf("linear_trit: bad M/K")
+	}
+	if len(x) < K {
+		return nil, 0, fmt.Errorf("linear_trit: x short")
+	}
+	if tileRows <= 0 {
+		tileRows = 8
+	}
+	if tileRows > M {
+		tileRows = M
+	}
+	out := make([]float32, M)
+	var usedScale float32
+	for r := 0; r < M; r += tileRows {
+		n := tileRows
+		if r+n > M {
+			n = M - r
+		}
+		part, sc, err := s.linearTritRows(name, x, K, r, n, bitplane)
+		if err != nil {
+			return nil, 0, err
+		}
+		if r == 0 {
+			usedScale = sc
+		}
+		copy(out[r:r+n], part)
+	}
+	return out, usedScale, nil
+}
+
+func linearTritGGUF(path, name string, x []float32, M, K, tileRows int, bitplane bool) ([]float32, float32, error) {
+	f, err := openGGUF(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.close()
+	s := &weightSess{Kind: "gguf", Path: path, gguf: f, Mapped: f.Mapped}
+	return s.linearTrit(name, x, M, K, tileRows, bitplane)
+}
+
 func linearGGUF(path, name string, x []float32, M, K, tileRows int) ([]float32, error) {
 	f, err := openGGUF(path)
 	if err != nil {
@@ -10425,6 +10653,70 @@ func biWeightSessionLinearTile(id, name, x, Kv, row0, nRows val) val {
 		os.Exit(1)
 	}
 	return f32sToSpan(ys)
+}
+func biWeightSessionLinearTrit(id, name, x, Mv, Kv val) val {
+	return biWeightSessionLinearTritFull(id, name, x, Mv, Kv, vI32(0), vI32(0))
+}
+func biWeightSessionLinearTritTile(id, name, x, Mv, Kv, tileV val) val {
+	return biWeightSessionLinearTritFull(id, name, x, Mv, Kv, tileV, vI32(0))
+}
+func biWeightSessionLinearTritFull(id, name, x, Mv, Kv, tileV, flag val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(flag) != 0 || asI(flag) != 0
+	ys, sc, err := s.linearTrit(fmtVal(name), xf, asI(Mv), asI(Kv), asI(tileV), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(ys), vF32(float64(sc))})
+}
+func biWeightSessionLinearTritRows(id, name, x, Kv, row0, nRows val) val {
+	return biWeightSessionLinearTritRowsFlag(id, name, x, Kv, row0, nRows, vI32(0))
+}
+func biWeightSessionLinearTritRowsFlag(id, name, x, Kv, row0, nRows, flag val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit_tile: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(flag) != 0 || asI(flag) != 0
+	ys, sc, err := s.linearTritRows(fmtVal(name), xf, asI(Kv), asI(row0), asI(nRows), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit_tile: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(ys), vF32(float64(sc))})
+}
+func biLoadGgufLinearTrit(path, name, x, Mv, Kv val) val {
+	return biLoadGgufLinearTritFull(path, name, x, Mv, Kv, vI32(0), vI32(0))
+}
+func biLoadGgufLinearTritTile(path, name, x, Mv, Kv, tileV val) val {
+	return biLoadGgufLinearTritFull(path, name, x, Mv, Kv, tileV, vI32(0))
+}
+func biLoadGgufLinearTritFull(path, name, x, Mv, Kv, tileV, flag val) val {
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(flag) != 0 || asI(flag) != 0
+	ys, sc, err := linearTritGGUF(fmtVal(path), fmtVal(name), xf, asI(Mv), asI(Kv), asI(tileV), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load_gguf_linear_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(ys), vF32(float64(sc))})
 }
 func biLoadGgufLinear(path, name, x, Mv, Kv val) val {
 	return biLoadGgufLinearTile(path, name, x, Mv, Kv, vI32(0))
@@ -13331,6 +13623,28 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 		}
 	case "weight_session_linear_tile":
 		fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTile(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+	case "weight_session_linear_trit":
+		if len(args) >= 7 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritFull(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		} else if len(args) >= 6 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritTile(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTrit(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		}
+	case "weight_session_linear_trit_tile":
+		if len(args) >= 7 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritRowsFlag(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritRows(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		}
+	case "load_gguf_linear_trit":
+		if len(args) >= 7 {
+			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTritFull(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		} else if len(args) >= 6 {
+			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTritTile(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTrit(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		}
 	case "load_gguf_linear":
 		if len(args) >= 6 {
 			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTile(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])

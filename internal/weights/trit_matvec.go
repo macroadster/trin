@@ -2,6 +2,38 @@ package weights
 
 import "math/bits"
 
+// QuantizeAbsMeanTrits maps f32 weights to BitNet-style absmean trits + scale.
+// dequant ≈ scale * trit with trit ∈ {-1,0,+1}.
+func QuantizeAbsMeanTrits(w []float32) (trits []int8, scale float32) {
+	n := len(w)
+	if n == 0 {
+		return []int8{}, 0
+	}
+	var sumAbs float64
+	for _, v := range w {
+		if v < 0 {
+			sumAbs -= float64(v)
+		} else {
+			sumAbs += float64(v)
+		}
+	}
+	scale64 := sumAbs / float64(n)
+	scale = float32(scale64)
+	trits = make([]int8, n)
+	if scale64 == 0 {
+		return trits, 0
+	}
+	for i, v := range w {
+		r := float64(v) / scale64
+		if r >= 0.5 {
+			trits[i] = 1
+		} else if r <= -0.5 {
+			trits[i] = -1
+		}
+	}
+	return trits, scale
+}
+
 // LinearTritScalar is the naive row-major mixed matvec:
 // y[i] = scale * sum_t W[i*K+t] * x[t]  with W in {-1,0,+1}.
 func LinearTritScalar(W []int8, x []float32, M, K int, scale float32) []float32 {

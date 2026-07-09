@@ -2038,4 +2038,22 @@ grep -q 'match_abc=1' /tmp/trin_bpe_i.txt
 grep -q 'bpe_sidecar_ok' /tmp/trin_bpe_n.txt
 grep -q 'match_abc=1' /tmp/trin_bpe_n.txt
 
-echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar)"
+echo "[llm] v1.06 session linear_trit + microbench"
+go run scripts/gen_trit_session_fixture.go . >/tmp/trin_gen_trit_sess.txt
+./trin run examples/weight_session_linear_trit.trin | tee /tmp/trin_sess_lt_i.txt
+grep -q 'weight_session_linear_trit_ok' /tmp/trin_sess_lt_i.txt
+grep -q 'parity_ok=1' /tmp/trin_sess_lt_i.txt
+grep -q 'tile_ok=1' /tmp/trin_sess_lt_i.txt
+./trin build examples/weight_session_linear_trit.trin -o build/weight_session_linear_trit --backend go
+./build/weight_session_linear_trit | tee /tmp/trin_sess_lt_n.txt
+grep -q 'weight_session_linear_trit_ok' /tmp/trin_sess_lt_n.txt
+grep -q 'parity_ok=1' /tmp/trin_sess_lt_n.txt
+./trin run examples/linear_trit_bench.trin | tee /tmp/trin_lt_bench_i.txt
+grep -q 'linear_trit_bench_ok' /tmp/trin_lt_bench_i.txt
+grep -q 'parity_ok=1' /tmp/trin_lt_bench_i.txt
+./trin build examples/linear_trit_bench.trin -o build/linear_trit_bench --backend go
+./build/linear_trit_bench | tee /tmp/trin_lt_bench_n.txt
+grep -q 'linear_trit_bench_ok' /tmp/trin_lt_bench_n.txt
+grep -q 'parity_ok=1' /tmp/trin_lt_bench_n.txt
+
+echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar + session linear_trit)"

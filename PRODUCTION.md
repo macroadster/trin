@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.05.0-go  
+**Version:** 1.06.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06).
 
 ## What is production-ready
 
@@ -22,7 +22,8 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 21. **CUDA PTX layer (v1.03)** — PTX emitters for linear/GEMM/trit, optional `ptxas` cubin, `cuda_plan_launch`, host-backed `cuda_alloc_f32` buffers
 22. **Tokenizer + GGUF decode (v1.04)** — `open_vocab` / `vocab_encode` / `vocab_decode` / `load_text` + multi-tensor `tiny_llm.gguf` session greedy decode with KV
 23. **SIMD trit matvec + BPE sidecar (v1.05)** — packed set-bit `linear_trit` bitplane path + `open_bpe` / `bpe_encode` local merges
-24–26. Linear trit, transformer cores, KV/sample, toolchain, verification
+24. **Session packed trit linear (v1.06)** — `weight_session_linear_trit` / `_tile` / `load_gguf_linear_trit`: GGUF/safetensors row tiles → absmean trit → scalar or bitplane matvec; microbench scripts report both paths
+25–27. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -124,6 +125,19 @@ CUDA device launch remains deferred; this release is the CPU end-to-end path.
 
 Fixtures: `demos/weights/tiny_bpe.vocab` + `tiny_bpe.merges`. Demos: `linear_trit_simd.trin`, `bpe_sidecar.trin`.
 
+## Session packed trit linear (v1.06)
+
+| Builtin / API | Role |
+|---|---|
+| `weight_session_linear_trit(id,name,x,M,K [,tile [,bitplane]])` | session load → absmean trit → matvec; returns `[y, scale]` |
+| `weight_session_linear_trit_tile(id,name,x,K,row0,nRows [,bitplane])` | row-window trit matvec |
+| `load_gguf_linear_trit(path,name,x,M,K [,tile [,bitplane]])` | one-shot GGUF path |
+
+Fixture: `demos/weights/trit_session.gguf` (via `scripts/gen_trit_session_fixture.go`).
+Demos: `weight_session_linear_trit.trin`, `linear_trit_bench.trin`.
+Bench: `scripts/bench_session_linear_trit.sh` (unit path + native wall time).
+Note: per-tile absmean scale is independent when `tileRows < M`; compare free-span full-tensor quant only with `tileRows=M`.
+
 ## Limits
 
 - CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
@@ -151,6 +165,9 @@ Fixtures: `demos/weights/tiny_bpe.vocab` + `tiny_bpe.merges`. Demos: `linear_tri
 - [x] Packed bitplane `linear_trit` + unit tests
 - [x] BPE sidecar package + `examples/bpe_sidecar.trin`
 - [x] Version `1.05.0-go`
+- [x] Session `weight_session_linear_trit` + tile/oneshot
+- [x] Microbench scalar vs planes + session demo
+- [x] Version `1.06.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -166,5 +183,9 @@ go run scripts/gen_tiny_llm_gguf.go .
 ./trin run examples/tiny_gguf_decode.trin
 ./trin run examples/linear_trit_simd.trin
 ./trin run examples/bpe_sidecar.trin
+go run scripts/gen_trit_session_fixture.go .
+./trin run examples/weight_session_linear_trit.trin
+./trin run examples/linear_trit_bench.trin
+bash scripts/bench_session_linear_trit.sh
 bash scripts/e2e_native.sh
 ```

@@ -1,0 +1,86 @@
+// v1.06 — free-span scalar vs bitplane linear_trit on M=32 K=256
+// Native-safe: let-bound spans (codegen needs local env use).
+// Throughput numbers: go test TestLinearTritBenchPaths + scripts/bench_session_linear_trit.sh
+
+fn make_w() {
+    // 32-trit pattern then double to 256, stack to 32 rows (8192)
+    let p = [
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1)
+    ];
+    let r1 = span_concat(p, p);      // 64
+    let r2 = span_concat(r1, r1);    // 128
+    let row = span_concat(r2, r2);   // 256
+    let a1 = span_concat(row, row);  // 2
+    let a2 = span_concat(a1, a1);    // 4
+    let a3 = span_concat(a2, a2);    // 8
+    let a4 = span_concat(a3, a3);    // 16
+    let full = span_concat(a4, a4);  // 32 rows
+    full
+}
+
+fn make_x() {
+    let p = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75
+    ];
+    let r1 = span_concat(p, p);
+    let r2 = span_concat(r1, r1);
+    let full = span_concat(r2, r2);
+    full
+}
+
+fn main() {
+    let M = 32;
+    let K = 256;
+    let scale = 0.5;
+    let W = make_w();
+    let x = make_x();
+    println(str_concat("M=", to_str(M)));
+    println(str_concat("K=", to_str(K)));
+    println(str_concat("W_len=", to_str(len(W))));
+    println(str_concat("x_len=", to_str(len(x))));
+    println(str_concat("simd_lane_width=", to_str(simd_lane_width())));
+
+    let y0 = linear_trit(W, x, M, K, scale, 0);
+    let y1 = linear_trit(W, x, M, K, scale, 1);
+    let d = y0[0] - y1[0];
+    let ad = (d < 0.0) | (0.0 - d) | d;
+    println(str_concat("y0=", to_str(y0[0])));
+    println(str_concat("y1=", to_str(y1[0])));
+    println(str_concat("parity_ok=", to_str(ad < 0.0001)));
+
+    // Unrolled free-span workload: 8 matvecs each path
+    let a0 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a1 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a2 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a3 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a4 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a5 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a6 = linear_trit(W, x, M, K, scale, 0)[0];
+    let a7 = linear_trit(W, x, M, K, scale, 0)[0];
+    let sum_s = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;
+
+    let b0 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b1 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b2 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b3 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b4 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b5 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b6 = linear_trit(W, x, M, K, scale, 1)[0];
+    let b7 = linear_trit(W, x, M, K, scale, 1)[0];
+    let sum_p = b0 + b1 + b2 + b3 + b4 + b5 + b6 + b7;
+
+    println(str_concat("iters=", to_str(8)));
+    println(str_concat("sum_scalar=", to_str(sum_s)));
+    println(str_concat("sum_planes=", to_str(sum_p)));
+    let ds = sum_s - sum_p;
+    let ads = (ds < 0.0) | (0.0 - ds) | ds;
+    println(str_concat("sum_parity_ok=", to_str(ads < 0.01)));
+    println(str_concat("linear_trit_bench_ok=", to_str(1)));
+    println("linear_trit_bench_ok");
+}

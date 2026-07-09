@@ -1,0 +1,91 @@
+// v1.06 — session-backed GGUF → absmean trit → scalar / packed bitplane linear
+// Path: open_weight_session → weight_session_linear_trit → close.
+// Fixture: demos/weights/trit_session.gguf (M=32, K=256 F32)
+
+fn make_x() {
+    // 256-lane activation pattern
+    let p = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75
+    ];
+    // build 256 by 8×32 via nested concat of the 32-span
+    let r0 = p;
+    let r1 = span_concat(r0, p);
+    let r2 = span_concat(r1, r1);
+    let r3 = span_concat(r2, r2);
+    r3
+}
+
+fn main() {
+    let M = 32;
+    let K = 256;
+    let x = make_x();
+    println(str_concat("x_len=", to_str(len(x))));
+    println(str_concat("simd_lane_width=", to_str(simd_lane_width())));
+
+    let sid = open_weight_session("demos/weights/trit_session.gguf");
+    let sh = weight_session_shape(sid, "weight");
+    println(str_concat("shape=", to_str(sh)));
+
+    // scalar path
+    let r0 = weight_session_linear_trit(sid, "weight", x, M, K, 8, 0);
+    let y0 = r0[0];
+    let s0 = r0[1];
+    // packed bitplane path
+    let r1 = weight_session_linear_trit(sid, "weight", x, M, K, 8, 1);
+    let y1 = r1[0];
+    let s1 = r1[1];
+
+    println(str_concat("scale0=", to_str(s0)));
+    println(str_concat("scale1=", to_str(s1)));
+    println(str_concat("y0_0=", to_str(y0[0])));
+    println(str_concat("y1_0=", to_str(y1[0])));
+    println(str_concat("y0_last=", to_str(y0[31])));
+    println(str_concat("y1_last=", to_str(y1[31])));
+
+    let d0 = y0[0] - y1[0];
+    let a0 = (d0 < 0.0) | (0.0 - d0) | d0;
+    let d1 = y0[31] - y1[31];
+    let a1 = (d1 < 0.0) | (0.0 - d1) | d1;
+    let ds = s0 - s1;
+    let ads = (ds < 0.0) | (0.0 - ds) | ds;
+    println(str_concat("abs_delta0=", to_str(a0)));
+    println(str_concat("abs_delta_last=", to_str(a1)));
+    println(str_concat("abs_delta_scale=", to_str(ads)));
+    let parity = (a0 < 0.0001) * (a1 < 0.0001) * (ads < 0.0001);
+    println(str_concat("parity_ok=", to_str(parity)));
+
+    // single-row tile API — matches full path only when tileRows=1 (same absmean window)
+    let r_one = weight_session_linear_trit(sid, "weight", x, M, K, 1, 1);
+    let y_one = r_one[0];
+    let rt = weight_session_linear_trit_tile(sid, "weight", x, K, 0, 1, 1);
+    let yt = rt[0];
+    let d2 = yt[0] - y_one[0];
+    let a2 = (d2 < 0.0) | (0.0 - d2) | d2;
+    println(str_concat("tile0_delta=", to_str(a2)));
+    println(str_concat("tile_ok=", to_str(a2 < 0.0001)));
+
+    // one-shot GGUF path
+    let ro = load_gguf_linear_trit("demos/weights/trit_session.gguf", "weight", x, M, K, 8, 1);
+    let yo = ro[0];
+    let d3 = yo[0] - y1[0];
+    let a3 = (d3 < 0.0) | (0.0 - d3) | d3;
+    println(str_concat("oneshot_delta=", to_str(a3)));
+    println(str_concat("oneshot_ok=", to_str(a3 < 0.0001)));
+
+    close_weight_session(sid);
+
+    // free-span linear_trit still works for comparison: load then quantize manually
+    let w = load_gguf_tensor("demos/weights/trit_session.gguf", "weight");
+    let q = quantize_absmean(w);
+    let yfree = linear_trit(q[0], x, M, K, q[1], 1);
+    let d4 = yfree[0] - y1[0];
+    // free-span quantizes full tensor once; session tiles re-quantize per tile so
+    // values may differ slightly — just report.
+    println(str_concat("free_vs_session0=", to_str(d4)));
+
+    println(str_concat("weight_session_linear_trit_ok=", to_str(1)));
+    println("weight_session_linear_trit_ok");
+}

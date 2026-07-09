@@ -110,3 +110,98 @@ func LinearGGUF(path, name string, x []float32, M, K, tileRows int) ([]float32, 
 	s := &WeightSession{Kind: "gguf", Path: path, gguf: f, Mapped: f.Mapped}
 	return s.Linear(name, x, M, K, tileRows)
 }
+
+// LinearTritRows loads a row window, absmean-quantizes to trits, and matvecs.
+// bitplane selects packed set-bit accumulate (v1.05 path) vs scalar 4-unroll.
+// Returned scale is the absmean scale applied to every output row in the window.
+func (s *WeightSession) LinearTritRows(name string, x []float32, K, row0, nRows int, bitplane bool) (y []float32, scale float32, err error) {
+	if s == nil {
+		return nil, 0, fmt.Errorf("nil session")
+	}
+	if K <= 0 || nRows <= 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: bad K/nRows")
+	}
+	if len(x) < K {
+		return nil, 0, fmt.Errorf("linear_trit_rows: x short (need %d have %d)", K, len(x))
+	}
+	if row0 < 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: negative row0")
+	}
+	nElem, _, err := s.tensorNElem(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	if nElem%K != 0 {
+		return nil, 0, fmt.Errorf("linear_trit_rows: nElem=%d not divisible by K=%d", nElem, K)
+	}
+	M := nElem / K
+	if row0+nRows > M {
+		return nil, 0, fmt.Errorf("linear_trit_rows OOB: row0=%d nRows=%d M=%d", row0, nRows, M)
+	}
+	wF, err := s.LoadF32Window(name, row0*K, nRows*K)
+	if err != nil {
+		return nil, 0, err
+	}
+	W, scale := QuantizeAbsMeanTrits(wF)
+	if bitplane {
+		y = LinearTritPlanes(W, x[:K], nRows, K, scale)
+	} else {
+		y = LinearTritScalar(W, x[:K], nRows, K, scale)
+	}
+	return y, scale, nil
+}
+
+// LinearTrit is the session-backed quantize + trit matvec path (v1.06).
+// GGUF/safetensors row tiles → absmean trit → scalar or packed bitplane matvec.
+// tileRows <= 0 defaults to 8 (or M if smaller).
+func (s *WeightSession) LinearTrit(name string, x []float32, M, K, tileRows int, bitplane bool) (y []float32, scale float32, err error) {
+	if M <= 0 || K <= 0 {
+		return nil, 0, fmt.Errorf("linear_trit: bad M/K")
+	}
+	if len(x) < K {
+		return nil, 0, fmt.Errorf("linear_trit: x short")
+	}
+	nElem, _, err := s.tensorNElem(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	if nElem < M*K {
+		return nil, 0, fmt.Errorf("linear_trit: tensor too small nElem=%d need %d", nElem, M*K)
+	}
+	if tileRows <= 0 {
+		tileRows = 8
+	}
+	if tileRows > M {
+		tileRows = M
+	}
+	out := make([]float32, M)
+	var usedScale float32
+	for r := 0; r < M; r += tileRows {
+		n := tileRows
+		if r+n > M {
+			n = M - r
+		}
+		part, sc, err := s.LinearTritRows(name, x, K, r, n, bitplane)
+		if err != nil {
+			return nil, 0, err
+		}
+		// First tile sets the report scale; later tiles re-quantize independently
+		// (same as one-shot window path when M is small enough for one tile).
+		if r == 0 {
+			usedScale = sc
+		}
+		copy(out[r:r+n], part)
+	}
+	return out, usedScale, nil
+}
+
+// LinearTritGGUF is a one-shot open + LinearTrit for a GGUF path.
+func LinearTritGGUF(path, name string, x []float32, M, K, tileRows int, bitplane bool) ([]float32, float32, error) {
+	f, err := OpenGGUF(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	s := &WeightSession{Kind: "gguf", Path: path, gguf: f, Mapped: f.Mapped}
+	return s.LinearTrit(name, x, M, K, tileRows, bitplane)
+}

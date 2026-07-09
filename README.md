@@ -313,6 +313,8 @@ session, tokenizes prompt `"AB"`, runs session attn + fused FFN/lm_head with gro
 greedily decodes three tokens on CPU (no CUDA).
 `examples/linear_trit_simd.trin` checks scalar vs bitplane `linear_trit` parity on K=140.
 `examples/bpe_sidecar.trin` loads local `tiny_bpe.vocab` + `tiny_bpe.merges` and encodes `"ABC"`.
+`examples/weight_session_linear_trit.trin` loads `trit_session.gguf` and runs session-backed scalar vs bitplane trit matvec.
+`examples/linear_trit_bench.trin` hammers free-span scalar vs planes for wall-time measurement.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -354,21 +356,23 @@ greedily decodes three tokens on CPU (no CUDA).
 | Char/token table tokenizer + load_text; multi-tensor GGUF session greedy decode demo | Network model fetch out of scope |
 | Packed bitplane `linear_trit` set-bit accumulate (v1.05) + scalar 4-unroll | Competitive tok/s still out of scope |
 | BPE sidecar `open_bpe` / merges file (local ranks, v1.05) | Full HF sentencepiece proto & network fetch out of scope |
+| Session `weight_session_linear_trit` GGUF→absmean→scalar/bitplane (v1.06) | Per-tile absmean ≠ full-tensor quant when tileRows < M |
 
-### Acceptance (v1.05)
+### Acceptance (v1.06)
 
-- `go test` green (weights trit_matvec + BPE; interp vocab/decode/bpe/simd demos)
-- `bash scripts/e2e_native.sh` green including `linear_trit_simd` + `bpe_sidecar` + `tiny_gguf_decode`
-- `./trin run examples/linear_trit_simd.trin` shows `linear_trit_simd_ok` / `parity_ok=1`
-- `./trin run examples/bpe_sidecar.trin` shows `bpe_sidecar_ok` / `match_abc=1`
-- Prior v1.04 decode demos still pass (`tiny_gguf_decode_ok`, `decode_ok=1`)
+- `go test` green (weights session LinearTrit + microbench log; interp session/trit demos)
+- `bash scripts/e2e_native.sh` green including `weight_session_linear_trit` + `linear_trit_bench`
+- `./trin run examples/weight_session_linear_trit.trin` shows `weight_session_linear_trit_ok` / `parity_ok=1`
+- `./trin run examples/linear_trit_bench.trin` shows `linear_trit_bench_ok` / `parity_ok=1`
+- Prior v1.05 demos still pass (`linear_trit_simd_ok`, `bpe_sidecar_ok`)
 
 ## Next
 
+- v1.06: session-backed packed trit linear + microbench
 - v1.05: packed bitplane `linear_trit` throughput path + local BPE sidecar merges loader
 - v1.04: char/token table tokenizer + multi-tensor GGUF session greedy decode (CPU)
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; prepack trit cache to skip per-call pack
 

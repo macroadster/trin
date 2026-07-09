@@ -43,7 +43,23 @@ func TestLinearTritEmpty(t *testing.T) {
 	if len(LinearTritPlanes(nil, nil, 0, 0, 1)) != 0 {
 		t.Fatal("empty")
 	}
-	if len(LinearTritScalar([]int8{1}, []float32{2}, 1, 1, 3) ) != 1 {
+	if len(LinearTritScalar([]int8{1}, []float32{2}, 1, 1, 3)) != 1 {
 		t.Fatal("1x1")
+	}
+}
+
+func TestQuantizeAbsMeanTrits(t *testing.T) {
+	w := []float32{1, -1, 0.1, 0.9, -0.9, 0}
+	tr, sc := QuantizeAbsMeanTrits(w)
+	if sc <= 0 {
+		t.Fatalf("scale %v", sc)
+	}
+	// 1/sc >= 0.5 => 1; -1/sc <= -0.5 => -1; small 0.1 often 0 depending on mean
+	if tr[0] != 1 || tr[1] != -1 {
+		t.Fatalf("ends %v scale=%v", tr, sc)
+	}
+	tr0, sc0 := QuantizeAbsMeanTrits(nil)
+	if len(tr0) != 0 || sc0 != 0 {
+		t.Fatalf("empty quant %v %v", tr0, sc0)
 	}
 }
