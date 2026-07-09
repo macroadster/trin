@@ -10402,6 +10402,177 @@ func (it *Interpreter) installBuiltins() {
 		return f32SliceToSpan(y), nil
 	})
 
+	// weight_session_forward_gqa_swiglu_block_trit(id, q,k,v,o, gate,up,down, x, Kpast,Vpast,
+	//   dim, hidden, nHeads, nKVHeads, dh [, attnGain] [, ffnGain] [, pos] [, base] [, bitplane] [, eps])
+	// → [y,K,V] residual GQA + SwiGLU FFN (v1.15).
+	nat("weight_session_forward_gqa_swiglu_block_trit", func(args []Value) (Value, error) {
+		if len(args) < 16 || args[8].Kind != VSpan || args[9].Kind != VSpan || args[10].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_swiglu_block_trit(id, q,k,v,o, gate,up,down, x, Kpast,Vpast, dim, hidden, nHeads, nKVHeads, dh [, attnGain] [, ffnGain] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_swiglu_block_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		spec := weights.AttnLayerSpec{
+			Q: strArg(args[1]), K: strArg(args[2]), V: strArg(args[3]), O: strArg(args[4]),
+			Gate: strArg(args[5]), Up: strArg(args[6]), Down: strArg(args[7]),
+			Hidden: args[12].AsInt(),
+		}
+		x := toF32(args[8].Span)
+		Kp := toF32(args[9].Span)
+		Vp := toF32(args[10].Span)
+		dim := args[11].AsInt()
+		nHeads, nKV, dh := args[13].AsInt(), args[14].AsInt(), args[15].AsInt()
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 17 {
+			spec.AttnGain = strArg(args[16])
+		}
+		if len(args) >= 18 {
+			spec.FFNGain = strArg(args[17])
+		}
+		if len(args) >= 19 {
+			pos = args[18].AsFloat()
+		}
+		if len(args) >= 20 {
+			base = args[19].AsFloat()
+		}
+		if len(args) >= 21 {
+			bitplane = args[20].AsFloat() != 0 || args[20].AsInt() != 0
+		}
+		if len(args) >= 22 {
+			eps = args[21].AsFloat()
+		}
+		y, kn, vn, err := s.ForwardGQASwiGLUBlockTrit(spec, x, Kp, Vp, dim, nHeads, nKV, dh, pos, base, bitplane, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_swiglu_block_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
+	// weight_session_gqa_swiglu_stack_trit(id, qCSV,kCSV,vCSV,oCSV, gateCSV,upCSV,downCSV,
+	//   x, KpastFlat,VpastFlat, dim, hidden, nHeads, nKVHeads, dh
+	//   [, attnGainCSV] [, ffnGainCSV] [, pos] [, base] [, bitplane] [, eps]) → [y,Kflat,Vflat]
+	nat("weight_session_gqa_swiglu_stack_trit", func(args []Value) (Value, error) {
+		if len(args) < 16 || args[8].Kind != VSpan || args[9].Kind != VSpan || args[10].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_stack_trit(id, qCSV,kCSV,vCSV,oCSV, gateCSV,upCSV,downCSV, x, KpastFlat,VpastFlat, dim, hidden, nHeads, nKVHeads, dh [, attnGainCSV] [, ffnGainCSV] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_stack_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[8].Span)
+		Kp := toF32(args[9].Span)
+		Vp := toF32(args[10].Span)
+		dim, hidden := args[11].AsInt(), args[12].AsInt()
+		nHeads, nKV, dh := args[13].AsInt(), args[14].AsInt(), args[15].AsInt()
+		attnGainCSV, ffnGainCSV := "", ""
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 17 {
+			attnGainCSV = strArg(args[16])
+		}
+		if len(args) >= 18 {
+			ffnGainCSV = strArg(args[17])
+		}
+		if len(args) >= 19 {
+			pos = args[18].AsFloat()
+		}
+		if len(args) >= 20 {
+			base = args[19].AsFloat()
+		}
+		if len(args) >= 21 {
+			bitplane = args[20].AsFloat() != 0 || args[20].AsInt() != 0
+		}
+		if len(args) >= 22 {
+			eps = args[21].AsFloat()
+		}
+		y, kn, vn, err := s.GQASwiGLUStackTritCSV(
+			strArg(args[1]), strArg(args[2]), strArg(args[3]), strArg(args[4]),
+			strArg(args[5]), strArg(args[6]), strArg(args[7]),
+			attnGainCSV, ffnGainCSV,
+			x, Kp, Vp, dim, hidden, nHeads, nKV, dh, pos, base, bitplane, eps,
+		)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_stack_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
+	// weight_session_gqa_swiglu_prefill_trit(id, qCSV,kCSV,vCSV,oCSV, gateCSV,upCSV,downCSV,
+	//   xs, KpastFlat,VpastFlat, dim, hidden, nHeads, nKVHeads, dh
+	//   [, attnGainCSV] [, ffnGainCSV] [, startPos] [, base] [, bitplane] [, eps])
+	// → [Yflat, Kflat, Vflat, yLast] multi-token causal prefill (v1.15).
+	nat("weight_session_gqa_swiglu_prefill_trit", func(args []Value) (Value, error) {
+		if len(args) < 16 || args[8].Kind != VSpan || args[9].Kind != VSpan || args[10].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_prefill_trit(id, qCSV,kCSV,vCSV,oCSV, gateCSV,upCSV,downCSV, xs, KpastFlat,VpastFlat, dim, hidden, nHeads, nKVHeads, dh [, attnGainCSV] [, ffnGainCSV] [, startPos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_prefill_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		xs := toF32(args[8].Span)
+		Kp := toF32(args[9].Span)
+		Vp := toF32(args[10].Span)
+		dim, hidden := args[11].AsInt(), args[12].AsInt()
+		nHeads, nKV, dh := args[13].AsInt(), args[14].AsInt(), args[15].AsInt()
+		attnGainCSV, ffnGainCSV := "", ""
+		startPos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 17 {
+			attnGainCSV = strArg(args[16])
+		}
+		if len(args) >= 18 {
+			ffnGainCSV = strArg(args[17])
+		}
+		if len(args) >= 19 {
+			startPos = args[18].AsFloat()
+		}
+		if len(args) >= 20 {
+			base = args[19].AsFloat()
+		}
+		if len(args) >= 21 {
+			bitplane = args[20].AsFloat() != 0 || args[20].AsInt() != 0
+		}
+		if len(args) >= 22 {
+			eps = args[21].AsFloat()
+		}
+		Y, kn, vn, yLast, err := s.PrefillGQASwiGLUStackTritCSV(
+			strArg(args[1]), strArg(args[2]), strArg(args[3]), strArg(args[4]),
+			strArg(args[5]), strArg(args[6]), strArg(args[7]),
+			attnGainCSV, ffnGainCSV,
+			xs, Kp, Vp, dim, hidden, nHeads, nKV, dh, startPos, base, bitplane, eps,
+		)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_swiglu_prefill_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(Y), f32SliceToSpan(kn), f32SliceToSpan(vn), f32SliceToSpan(yLast)}), nil
+	})
+
 	// weight_session_linear_fused(id, name, x, M, K [, tileRows]) → span[f32] (v0.89 block-stream)
 	nat("weight_session_linear_fused", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

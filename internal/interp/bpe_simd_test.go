@@ -360,3 +360,41 @@ func TestTinyGGUFDecodeGQATritDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionGQASwiGLUPrefillDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_gqa_swiglu.gguf")); err != nil {
+		t.Skip("missing demos/weights/tiny_gqa_swiglu.gguf")
+	}
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_llm.vocab")); err != nil {
+		t.Skip("missing demos/weights/tiny_llm.vocab")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_gqa_swiglu_prefill.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_gqa_swiglu_prefill_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"decode_ok=1",
+		"parity_prefill_ok=1",
+		"stack_match=1",
+		"grow_final_ok=1",
+		"plane_ok=1",
+		"gen_text=FFF",
+		"prepack_built=15",
+		"prepack_hits2=15",
+		"final_kv_flat_len=16",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

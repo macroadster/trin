@@ -1,0 +1,207 @@
+// v1.15 — multi-token GQA SwiGLU prefill + decode
+// Fixture: demos/weights/tiny_gqa_swiglu.gguf (vocab=8 dim=4 nHeads=2 nKV=1, SwiGLU)
+// Prefill prompt via weight_session_gqa_swiglu_prefill_trit; match sequential stack;
+// generate tokens with final_norm + lm_head.
+
+fn main() {
+    let vid = open_vocab("demos/weights/tiny_llm.vocab");
+    let prompt = "AB";
+    let ids = vocab_encode(vid, prompt);
+    println(str_concat("prompt=", prompt));
+    println(str_concat("prompt_ids=", to_str(ids)));
+
+    let sid = open_weight_session("demos/weights/tiny_gqa_swiglu.gguf");
+    let dim = 4;
+    let vocab = 8;
+    let hidden = 8;
+    let nLayers = 2;
+    let nHeads = 2;
+    let nKV = 1;
+    let dh = 2;
+    let dKV = 2;
+    let bp = 1;
+    let ropeBase = 10000.0;
+    let eps = 0.000001;
+    let E = weight_session_tensor(sid, "tok_emb");
+    let empty = [];
+
+    // prepack Q/K/V/O/Gate/Up/lm_head (in-features=dim) + Down (in-features=hidden)
+    // Gate/Up are hidden×dim so K=dim for prepack.
+    let p1a = weight_session_prepack_trit_csv(sid,
+        "L0_q,L0_k,L0_v,L0_o,L0_gate,L0_up,L1_q,L1_k,L1_v,L1_o,L1_gate,L1_up,lm_head", dim);
+    let p1b = weight_session_prepack_trit_csv(sid, "L0_down,L1_down", hidden);
+    let p2a = weight_session_prepack_trit_csv(sid,
+        "L0_q,L0_k,L0_v,L0_o,L0_gate,L0_up,L1_q,L1_k,L1_v,L1_o,L1_gate,L1_up,lm_head", dim);
+    let p2b = weight_session_prepack_trit_csv(sid, "L0_down,L1_down", hidden);
+    println(str_concat("prepack_built=", to_str(p1a[0] + p1b[0])));
+    println(str_concat("prepack_hits1=", to_str(p1a[1] + p1b[1])));
+    println(str_concat("prepack_built2=", to_str(p2a[0] + p2b[0])));
+    println(str_concat("prepack_hits2=", to_str(p2a[1] + p2b[1])));
+    let packs = weight_session_has_trit_pack(sid, "L0_gate")
+        * weight_session_has_trit_pack(sid, "L1_up")
+        * weight_session_has_trit_pack(sid, "L0_down")
+        * weight_session_has_trit_pack(sid, "lm_head");
+    println(str_concat("all_packs_present=", to_str(packs)));
+
+    let qCSV = "L0_q,L1_q";
+    let kCSV = "L0_k,L1_k";
+    let vCSV = "L0_v,L1_v";
+    let oCSV = "L0_o,L1_o";
+    let gateCSV = "L0_gate,L1_gate";
+    let upCSV = "L0_up,L1_up";
+    let downCSV = "L0_down,L1_down";
+    let anCSV = "L0_an,L1_an";
+    let fnCSV = "L0_fn,L1_fn";
+
+    // build prompt embeddings flat
+    let t0 = ids[0];
+    let t1 = ids[1];
+    let x0 = embed_row(E, t0, dim);
+    let x1 = embed_row(E, t1, dim);
+    let xs = [x0[0], x0[1], x0[2], x0[3], x1[0], x1[1], x1[2], x1[3]];
+
+    // sequential stack baseline
+    let s0 = weight_session_gqa_swiglu_stack_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x0, empty, empty, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 0.0, ropeBase, bp, eps);
+    let yA = s0[0];
+    let KA = s0[1];
+    let VA = s0[2];
+    let s1 = weight_session_gqa_swiglu_stack_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x1, KA, VA, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 1.0, ropeBase, bp, eps);
+    let yB = s1[0];
+    let KB = s1[1];
+    let VB = s1[2];
+    println(str_concat("seq_kv_len=", to_str(len(KB))));
+
+    // prefill both tokens at once
+    let pf = weight_session_gqa_swiglu_prefill_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        xs, empty, empty, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 0.0, ropeBase, bp, eps);
+    let Yf = pf[0];
+    let Kp = pf[1];
+    let Vp = pf[2];
+    let yLast = pf[3];
+    println(str_concat("Yflat_len=", to_str(len(Yf))));
+    println(str_concat("prefill_kv_len=", to_str(len(Kp))));
+
+    // parity: Yflat[0:dim] vs yA; Yflat[dim:] and yLast vs yB
+    let d0r = Yf[0] - yA[0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = Yf[3] - yA[3];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let d2r = Yf[4] - yB[0];
+    let d2 = (d2r < 0.0) | (0.0 - d2r) | d2r;
+    let d3r = Yf[7] - yB[3];
+    let d3 = (d3r < 0.0) | (0.0 - d3r) | d3r;
+    let dlr = yLast[0] - yB[0];
+    let dl = (dlr < 0.0) | (0.0 - dlr) | dlr;
+    let parity_prefill = (d0 < 0.0001) * (d1 < 0.0001) * (d2 < 0.0001) * (d3 < 0.0001) * (dl < 0.0001);
+    println(str_concat("parity_prefill_ok=", to_str(parity_prefill)));
+
+    let flat_ok = (len(Kp) == nLayers * 2 * dKV) * (len(Vp) == nLayers * 2 * dKV)
+        * (len(Kp) == len(KB));
+    println(str_concat("flat_ok=", to_str(flat_ok)));
+
+    // final_norm + lm_head → gen1
+    let yBn = weight_session_final_norm(sid, yLast, dim, "final_norm", eps);
+    let logits1 = weight_session_linear_trit_cached(sid, "lm_head", yBn, vocab, dim, bp)[0];
+    let gtok1 = sample_logits(logits1, 0.0);
+    println(str_concat("gen1=", to_str(gtok1)));
+    println(str_concat("gen1_tok=", vocab_token(vid, gtok1)));
+
+    let x2 = embed_row(E, gtok1, dim);
+    let st2 = weight_session_gqa_swiglu_stack_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x2, Kp, Vp, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 2.0, ropeBase, bp, eps);
+    let y2 = st2[0];
+    let Kf = st2[1];
+    let Vf = st2[2];
+    let y2n = weight_session_final_norm(sid, y2, dim, "final_norm", eps);
+    let logits2 = weight_session_linear_trit_cached(sid, "lm_head", y2n, vocab, dim, bp)[0];
+    let gtok2 = sample_logits(logits2, 0.0);
+    println(str_concat("gen2=", to_str(gtok2)));
+    println(str_concat("gen2_tok=", vocab_token(vid, gtok2)));
+
+    let x3 = embed_row(E, gtok2, dim);
+    let st3 = weight_session_gqa_swiglu_stack_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x3, Kf, Vf, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 3.0, ropeBase, bp, eps);
+    let y3 = st3[0];
+    let Kf = st3[1];
+    let Vf = st3[2];
+    let y3n = weight_session_final_norm(sid, y3, dim, "final_norm", eps);
+    let logits3 = weight_session_linear_trit_cached(sid, "lm_head", y3n, vocab, dim, bp)[0];
+    let gtok3 = sample_logits(logits3, 0.0);
+    println(str_concat("gen3=", to_str(gtok3)));
+    println(str_concat("gen3_tok=", vocab_token(vid, gtok3)));
+    println(str_concat("final_kv_flat_len=", to_str(len(Kf))));
+    let grow_final_ok = (len(Kf) == nLayers * 4 * dKV) * (len(Vf) == nLayers * 4 * dKV);
+    println(str_concat("grow_final_ok=", to_str(grow_final_ok)));
+
+    let out_ids = [gtok1, gtok2, gtok3];
+    let out_txt = vocab_decode(vid, out_ids);
+    println(str_concat("gen_text=", out_txt));
+
+    // block compose vs stack on first token
+    let b0 = weight_session_forward_gqa_swiglu_block_trit(
+        sid, "L0_q", "L0_k", "L0_v", "L0_o", "L0_gate", "L0_up", "L0_down",
+        x0, empty, empty, dim, hidden, nHeads, nKV, dh,
+        "L0_an", "L0_fn", 0.0, ropeBase, bp, eps);
+    let y0a = b0[0];
+    let b1 = weight_session_forward_gqa_swiglu_block_trit(
+        sid, "L1_q", "L1_k", "L1_v", "L1_o", "L1_gate", "L1_up", "L1_down",
+        y0a, empty, empty, dim, hidden, nHeads, nKV, dh,
+        "L1_an", "L1_fn", 0.0, ropeBase, bp, eps);
+    let y0m = b1[0];
+    let pdr0 = yA[0] - y0m[0];
+    let pd0 = (pdr0 < 0.0) | (0.0 - pdr0) | pdr0;
+    let pdr1 = yA[3] - y0m[3];
+    let pd1 = (pdr1 < 0.0) | (0.0 - pdr1) | pdr1;
+    let stack_match = (pd0 < 0.0001) * (pd1 < 0.0001);
+    println(str_concat("stack_match=", to_str(stack_match)));
+
+    // plane parity on first stack call
+    let sts = weight_session_gqa_swiglu_stack_trit(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x0, empty, empty, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 0.0, ropeBase, 0, eps);
+    let yss = sts[0];
+    let psr0 = yA[0] - yss[0];
+    let ps0 = (psr0 < 0.0) | (0.0 - psr0) | psr0;
+    let psr1 = yA[3] - yss[3];
+    let ps1 = (psr1 < 0.0) | (0.0 - psr1) | psr1;
+    let plane_ok = (ps0 < 0.0001) * (ps1 < 0.0001);
+    println(str_concat("plane_ok=", to_str(plane_ok)));
+
+    let packs_after = weight_session_has_trit_pack(sid, "L0_gate")
+        * weight_session_has_trit_pack(sid, "L1_down")
+        * weight_session_has_trit_pack(sid, "lm_head");
+    let pa = weight_session_prepack_trit_csv(sid, "L0_gate,L1_up,lm_head", dim);
+    let pb = weight_session_prepack_trit_csv(sid, "L0_down,L1_down", hidden);
+    println(str_concat("packs_after=", to_str(packs_after)));
+    println(str_concat("prepack_after_hits=", to_str(pa[1] + pb[1])));
+
+    let hit_ok = (p1a[0] + p1b[0] == 15) * (p2a[0] + p2b[0] == 0)
+        * (p2a[1] + p2b[1] == 15) * packs * packs_after
+        * (pa[0] + pb[0] == 0);
+    let decode_ok = (len(ids) == 2) * flat_ok * grow_final_ok
+        * (gtok1 >= 0) * (gtok1 < vocab)
+        * (gtok2 >= 0) * (gtok2 < vocab)
+        * (gtok3 >= 0) * (gtok3 < vocab);
+    let parity_ok = parity_prefill * stack_match * plane_ok;
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("decode_ok=", to_str(decode_ok)));
+    println(str_concat("weight_session_gqa_swiglu_prefill_ok=", to_str(hit_ok * parity_ok * decode_ok)));
+    println("weight_session_gqa_swiglu_prefill_ok");
+
+    close_weight_session(sid);
+    close_vocab(vid);
+}

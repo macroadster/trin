@@ -752,3 +752,253 @@ func TestGQAStackTritParityAndFinalNorm(t *testing.T) {
 		t.Fatal("bad head ratio")
 	}
 }
+
+func TestSwiGLUF32AndMul(t *testing.T) {
+	a := []float32{1, -1, 0.5}
+	b := []float32{2, 3, 4}
+	m, err := MulF32(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(m[0], 2) || !near(m[1], -3) || !near(m[2], 2) {
+		t.Fatalf("mul %v", m)
+	}
+	if _, err := MulF32(a, b[:2]); err == nil {
+		t.Fatal("len mismatch")
+	}
+	// SiLU(0)=0, SiLU(large)≈x
+	sg, err := SwiGLUF32([]float32{0, 10}, []float32{3, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(sg[0], 0) {
+		t.Fatalf("silu(0)*3 = %v", sg[0])
+	}
+	if math.Abs(float64(sg[1]-20)) > 0.01 {
+		t.Fatalf("silu(10)*2 ≈ %v", sg[1])
+	}
+}
+
+func TestGQASwiGLUStackAndPrefill(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gqa_swiglu.gguf")
+	dim, hidden := 4, 4
+	nHeads, nKVHeads, dh := 2, 1, 2
+	dKV := nKVHeads * dh
+	I4 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	// K/V 2×4
+	K0 := []float32{1, 0.1, 0, 0, 0, 1, 0.1, 0}
+	V0 := []float32{0.8, 0, 0.1, 0, 0, 0.8, 0, 0.1}
+	// Gate slightly off-identity to make SwiGLU visible vs SiLU-only
+	Gate0 := []float32{
+		1, 0, 0, 0.05,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0.05, 0, 0, 1,
+	}
+	Up0 := I4
+	Down0 := I4
+	K1 := []float32{1, 0, 0, 0.05, 0, 1, 0.05, 0}
+	V1 := []float32{0.75, 0, 0.05, 0, 0, 0.75, 0, 0.05}
+	Gate1 := []float32{
+		0.9, 0, 0, 0,
+		0, 0.9, 0, 0,
+		0, 0, 0.9, 0,
+		0, 0, 0, 0.9,
+	}
+	Up1 := []float32{
+		0.5, 0, 0, 0,
+		0, 0.5, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0, 0.5,
+	}
+	Down1 := Up1
+	g := []float32{1, 1, 1, 1}
+	tensors := map[string][]float32{
+		"L0_q": I4, "L0_k": K0, "L0_v": V0, "L0_o": I4,
+		"L0_gate": Gate0, "L0_up": Up0, "L0_down": Down0, "L0_an": g, "L0_fn": g,
+		"L1_q": I4, "L1_k": K1, "L1_v": V1, "L1_o": I4,
+		"L1_gate": Gate1, "L1_up": Up1, "L1_down": Down1, "L1_an": g, "L1_fn": g,
+		"final_norm": g,
+	}
+	shapes := map[string][]uint64{
+		"L0_q": {4, 4}, "L0_k": {2, 4}, "L0_v": {2, 4}, "L0_o": {4, 4},
+		"L0_gate": {4, 4}, "L0_up": {4, 4}, "L0_down": {4, 4}, "L0_an": {4}, "L0_fn": {4},
+		"L1_q": {4, 4}, "L1_k": {2, 4}, "L1_v": {2, 4}, "L1_o": {4, 4},
+		"L1_gate": {4, 4}, "L1_up": {4, 4}, "L1_down": {4, 4}, "L1_an": {4}, "L1_fn": {4},
+		"final_norm": {4},
+	}
+	if err := WriteGGUFF32(path, tensors, shapes, map[string]string{"general.name": "gqa-swiglu"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+
+	x := []float32{1.0, 0.5, -0.25, 0.75}
+	eps := 1e-6
+	if _, _, err := s.PrepackTritCSV("L0_q,L0_k,L0_v,L0_o,L0_gate,L0_up,L1_q,L1_k,L1_v,L1_o,L1_gate,L1_up", dim); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PrepackTritCSV("L0_down,L1_down", hidden); err != nil {
+		t.Fatal(err)
+	}
+
+	manual := func(spec AttnLayerSpec, xin, kp, vp []float32, pos float64, bp bool) ([]float32, []float32, []float32) {
+		ag, err := s.loadGain(spec.AttnGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		xn := RMSNormF32(xin, eps, ag)
+		a, kn, vn, err := s.SessionAttnGQATrit(spec.Q, spec.K, spec.V, spec.O, xn, kp, vp, dim, nHeads, nKVHeads, dh, pos, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			h[i] = xin[i] + a[i]
+		}
+		fg, err := s.loadGain(spec.FFNGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hn := RMSNormF32(h, eps, fg)
+		gate, _, err := s.LinearTritCached(spec.Gate, hn, hidden, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, _, err := s.LinearTritCached(spec.Up, hn, hidden, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		act, err := SwiGLUF32(gate, up)
+		if err != nil {
+			t.Fatal(err)
+		}
+		down, _, err := s.LinearTritCached(spec.Down, act, dim, hidden, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			y[i] = h[i] + down[i]
+		}
+		return y, kn, vn
+	}
+	l0 := AttnLayerSpec{Q: "L0_q", K: "L0_k", V: "L0_v", O: "L0_o", AttnGain: "L0_an", FFNGain: "L0_fn", Gate: "L0_gate", Up: "L0_up", Down: "L0_down", Hidden: hidden}
+	l1 := AttnLayerSpec{Q: "L1_q", K: "L1_k", V: "L1_v", O: "L1_o", AttnGain: "L1_an", FFNGain: "L1_fn", Gate: "L1_gate", Up: "L1_up", Down: "L1_down", Hidden: hidden}
+
+	for _, bp := range []bool{false, true} {
+		y0m, k0, _ := manual(l0, x, nil, nil, 0, bp)
+		y0, k0b, _, err := s.ForwardGQASwiGLUBlockTrit(l0, x, nil, nil, dim, nHeads, nKVHeads, dh, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y0m {
+			if !near(y0m[i], y0[i]) {
+				t.Fatalf("swiglu block0 bp=%v i=%d %v vs %v", bp, i, y0m[i], y0[i])
+			}
+		}
+		if len(k0) != dKV || len(k0b) != dKV {
+			t.Fatalf("kv0")
+		}
+		y1m, _, _ := manual(l1, y0m, nil, nil, 0, bp)
+		ys, kns, vns, err := s.GQASwiGLUStackTrit([]AttnLayerSpec{l0, l1}, x, nil, nil, dim, nHeads, nKVHeads, dh, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y1m {
+			if !near(y1m[i], ys[i]) {
+				t.Fatalf("swiglu stack bp=%v i=%d", bp, i)
+			}
+		}
+		yCSV, kFlat, vFlat, err := s.GQASwiGLUStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_gate,L1_gate", "L0_up,L1_up", "L0_down,L1_down",
+			"L0_an,L1_an", "L0_fn,L1_fn",
+			x, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ys {
+			if !near(ys[i], yCSV[i]) {
+				t.Fatalf("csv y")
+			}
+		}
+		if len(kFlat) != 2*dKV || len(vFlat) != 2*dKV {
+			t.Fatalf("flat %d %d", len(kFlat), len(vFlat))
+		}
+		// multi-token prefill matches token-by-token
+		x1 := []float32{0.5, -0.5, 0.25, 0.0}
+		xs := append(append([]float32{}, x...), x1...)
+		// sequential
+		yA, kA, vA, err := s.GQASwiGLUStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_gate,L1_gate", "L0_up,L1_up", "L0_down,L1_down",
+			"L0_an,L1_an", "L0_fn,L1_fn",
+			x, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		yB, kB, vB, err := s.GQASwiGLUStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_gate,L1_gate", "L0_up,L1_up", "L0_down,L1_down",
+			"L0_an,L1_an", "L0_fn,L1_fn",
+			x1, kA, vA, dim, hidden, nHeads, nKVHeads, dh, 1, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		Yf, kP, vP, yLast, err := s.PrefillGQASwiGLUStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_gate,L1_gate", "L0_up,L1_up", "L0_down,L1_down",
+			"L0_an,L1_an", "L0_fn,L1_fn",
+			xs, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(Yf) != 2*dim {
+			t.Fatalf("Yflat len %d", len(Yf))
+		}
+		for i := 0; i < dim; i++ {
+			if !near(Yf[i], yA[i]) || !near(Yf[dim+i], yB[i]) || !near(yLast[i], yB[i]) {
+				t.Fatalf("prefill parity bp=%v i=%d", bp, i)
+			}
+		}
+		if len(kP) != len(kB) || len(vP) != len(vB) {
+			t.Fatalf("prefill kv len %d vs %d", len(kP), len(kB))
+		}
+		for i := range kP {
+			if !near(kP[i], kB[i]) {
+				t.Fatalf("prefill K i=%d", i)
+			}
+		}
+		// grow: 2 layers × 2 toks × dKV
+		if len(kP) != 2*2*dKV {
+			t.Fatalf("prefill flat grow %d", len(kP))
+		}
+		_ = kns
+		_ = vns
+	}
+
+	if _, _, _, err := s.GQASwiGLUStackTritCSV("", "", "", "", "", "", "", "", "", x, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, true, eps); err == nil {
+		t.Fatal("empty")
+	}
+	if _, _, _, _, err := s.PrefillGQASwiGLUStackTritCSV(
+		"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+		"L0_gate,L1_gate", "L0_up,L1_up", "L0_down,L1_down",
+		"", "", []float32{1, 2, 3}, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, true, eps,
+	); err == nil {
+		t.Fatal("bad xs")
+	}
+}
