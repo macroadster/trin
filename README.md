@@ -246,6 +246,10 @@ load_gguf_linear_fused(path, name, x, M, K [, tileRows])
 // v0.90 multi-layer residual fused linear + RMSNorm
 weight_session_forward_block(id, wName, x, dim [, gainName] [, mode] [, tileRows] [, eps])
 weight_session_layer_stack(id, wCSV, x, dim [, gainCSV] [, modeCSV] [, tileRows] [, eps])
+// v1.09 multi-layer residual trit-cached linear + RMSNorm
+weight_session_forward_block_trit(id, wName, x, dim [, gainName] [, mode] [, bitplane] [, eps])
+weight_session_layer_stack_trit(id, wCSV, x, dim [, gainCSV] [, modeCSV] [, bitplane] [, eps])
+weight_session_prepack_trit_csv(id, wCSV, K) → [built, hits]
 // v0.91 session-wired QKV + attn/mha (growing KV)
 weight_session_attn_proj(id, q,k,v, x, dIn, dOut [, tileRows]) → [q,k,v]
 weight_session_attn(id, q,k,v, x, Kpast, Vpast, dIn, dOut [, o] [, h] [, pos] [, base] [, tile]) → [y,K,V]
@@ -317,6 +321,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/linear_trit_bench.trin` hammers free-span scalar vs planes for wall-time measurement.
 `examples/weight_session_trit_cache.trin` prepacks once, hits cache, and checks cached scalar/planes parity.
 `examples/tiny_gguf_decode_trit.trin` prepacks tiny_llm linears once and runs multi-token decode on the hit path.
+`examples/weight_session_layer_stack_trit.trin` prepacks W0,W1 once and chains residual/plain RMSNorm blocks on the trit cache.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -361,16 +366,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Session `weight_session_linear_trit` GGUF→absmean→scalar/bitplane (v1.06) | Per-tile absmean ≠ full-tensor quant when tileRows < M |
 | Session trit prepack cache + `linear_trit_cached` (v1.07) | Cache is process-local; dropped on close |
 | Tiny GGUF decode via trit cache (v1.08) | Trit quant tokens may differ from fused-f32 decode |
+| Trit residual stack on prepack cache (v1.09) | Square dim×dim layers; not full attn blocks |
 
-### Acceptance (v1.08)
+### Acceptance (v1.09)
 
-- `go test` green (interp tiny_gguf_decode_trit demo; prior prepack cache tests)
-- `bash scripts/e2e_native.sh` green including `tiny_gguf_decode_trit`
-- `./trin run examples/tiny_gguf_decode_trit.trin` shows `tiny_gguf_decode_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
-- Prior v1.07 demos still pass (`weight_session_trit_cache_ok`)
+- `go test` green (weights LayerStackTrit + interp layer_stack_trit demo)
+- `bash scripts/e2e_native.sh` green including `weight_session_layer_stack_trit`
+- `./trin run examples/weight_session_layer_stack_trit.trin` shows `weight_session_layer_stack_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
+- Prior v1.08 demos still pass (`tiny_gguf_decode_trit_ok`)
 
 ## Next
 
+- v1.09: multi-layer residual stack on trit-cached linears
 - v1.08: wire cached trit linear into tiny GGUF decode
 - v1.07: session trit prepack cache (skip re-quant/re-pack on repeated matvec)
 - v1.06: session-backed packed trit linear + microbench
@@ -379,5 +386,5 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; multi-layer residual stack on trit-cached linears
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; session-wired attn path on trit-cached projections
 

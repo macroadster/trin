@@ -119,3 +119,34 @@ func TestWeightSessionTritCacheDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionLayerStackTritDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/layer_stack.gguf")); err != nil {
+		t.Skip("missing demos/weights/layer_stack.gguf")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_layer_stack_trit.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_layer_stack_trit_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"stack_match=1",
+		"plane_ok=1",
+		"uncached_ok=1",
+		"prepack_built=2",
+		"prepack_hits2=2",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

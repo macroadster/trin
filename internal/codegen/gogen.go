@@ -9653,6 +9653,120 @@ func (s *weightSess) layerStackCSV(wCSV, gainCSV, modeCSV string, x []float32, d
 	return cur, nil
 }
 
+// forwardBlockTrit: residual/plain block via prepacked trit linear (v1.09).
+func (s *weightSess) forwardBlockTrit(wName, gainName, mode string, x []float32, dim int, bitplane bool, eps float64) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, fmt.Errorf("forward_block_trit: bad dim")
+	}
+	mode = strings.ToLower(mode)
+	if mode == "" {
+		mode = "residual"
+	}
+	xIn := x[:dim]
+	y, _, err := s.linearTritCached(wName, xIn, dim, dim, bitplane)
+	if err != nil {
+		return nil, err
+	}
+	h := make([]float32, dim)
+	switch mode {
+	case "plain":
+		copy(h, y)
+	case "residual":
+		for i := 0; i < dim; i++ {
+			h[i] = xIn[i] + y[i]
+		}
+	default:
+		return nil, fmt.Errorf("forward_block_trit: unknown mode %q", mode)
+	}
+	gain, err := s.loadGain(gainName, dim)
+	if err != nil {
+		return nil, err
+	}
+	return rmsNormF32(h, eps, gain), nil
+}
+
+func (s *weightSess) layerStackTritCSV(wCSV, gainCSV, modeCSV string, x []float32, dim int, bitplane bool, eps float64) ([]float32, error) {
+	split := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	wNames := split(wCSV)
+	gainNames := split(gainCSV)
+	modes := split(modeCSV)
+	if len(wNames) == 0 {
+		return nil, fmt.Errorf("layer_stack_trit: empty layers")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, fmt.Errorf("layer_stack_trit: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	for i, w := range wNames {
+		g := ""
+		if i < len(gainNames) {
+			g = gainNames[i]
+		}
+		m := ""
+		if i < len(modes) {
+			m = modes[i]
+		}
+		next, err := s.forwardBlockTrit(w, g, m, cur, dim, bitplane, eps)
+		if err != nil {
+			return nil, fmt.Errorf("layer_stack_trit layer %d: %w", i, err)
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+func (s *weightSess) prepackTritCSV(wCSV string, K int) (built, hits int, err error) {
+	split := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	names := split(wCSV)
+	if len(names) == 0 {
+		return 0, 0, fmt.Errorf("prepack_trit_csv: empty names")
+	}
+	for _, n := range names {
+		b, e := s.prepackTrit(n, K)
+		if e != nil {
+			return built, hits, e
+		}
+		if b {
+			built++
+		} else {
+			hits++
+		}
+	}
+	return built, hits, nil
+}
+
 
 // --- v0.92 GQA packing ---
 func gqaExpandKV(kv []float32, nTok, nKVHeads, nHeads, dh int) ([]float32, error) {
@@ -10740,6 +10854,82 @@ func biWeightSessionForwardBlockFull(id, wName, x, dimV, gainName, mode, tileV, 
 	}
 	return f32sToSpan(ys)
 }
+
+// --- v1.09 trit residual stack ---
+func biWeightSessionLayerStackTrit(id, wCSV, x, dimV val) val {
+	return biWeightSessionLayerStackTritFull(id, wCSV, x, dimV, vStr(""), vStr(""), vI32(0), vF32(1e-6))
+}
+func biWeightSessionLayerStackTritG(id, wCSV, x, dimV, gainCSV val) val {
+	return biWeightSessionLayerStackTritFull(id, wCSV, x, dimV, gainCSV, vStr(""), vI32(0), vF32(1e-6))
+}
+func biWeightSessionLayerStackTritGM(id, wCSV, x, dimV, gainCSV, modeCSV val) val {
+	return biWeightSessionLayerStackTritFull(id, wCSV, x, dimV, gainCSV, modeCSV, vI32(0), vF32(1e-6))
+}
+func biWeightSessionLayerStackTritGMB(id, wCSV, x, dimV, gainCSV, modeCSV, bp val) val {
+	return biWeightSessionLayerStackTritFull(id, wCSV, x, dimV, gainCSV, modeCSV, bp, vF32(1e-6))
+}
+func biWeightSessionLayerStackTritFull(id, wCSV, x, dimV, gainCSV, modeCSV, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_layer_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	ys, err := s.layerStackTritCSV(fmtVal(wCSV), fmtVal(gainCSV), fmtVal(modeCSV), xf, asI(dimV), use, asF(epsV))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_layer_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(ys)
+}
+func biWeightSessionForwardBlockTrit(id, wName, x, dimV val) val {
+	return biWeightSessionForwardBlockTritFull(id, wName, x, dimV, vStr(""), vStr("residual"), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardBlockTritG(id, wName, x, dimV, gainName val) val {
+	return biWeightSessionForwardBlockTritFull(id, wName, x, dimV, gainName, vStr("residual"), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardBlockTritGM(id, wName, x, dimV, gainName, mode val) val {
+	return biWeightSessionForwardBlockTritFull(id, wName, x, dimV, gainName, mode, vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardBlockTritGMB(id, wName, x, dimV, gainName, mode, bp val) val {
+	return biWeightSessionForwardBlockTritFull(id, wName, x, dimV, gainName, mode, bp, vF32(1e-6))
+}
+func biWeightSessionForwardBlockTritFull(id, wName, x, dimV, gainName, mode, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	ys, err := s.forwardBlockTrit(fmtVal(wName), fmtVal(gainName), fmtVal(mode), xf, asI(dimV), use, asF(epsV))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(ys)
+}
+func biWeightSessionPrepackTritCSV(id, wCSV, Kv val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_prepack_trit_csv: %v\n", err)
+		os.Exit(1)
+	}
+	built, hits, err := s.prepackTritCSV(fmtVal(wCSV), asI(Kv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_prepack_trit_csv: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{vI32(built), vI32(hits)})
+}
+
 func biWeightSessionLinearFused(id, name, x, Mv, Kv val) val {
 	return biWeightSessionLinearFusedTileArg(id, name, x, Mv, Kv, vI32(0))
 }
@@ -14007,6 +14197,34 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 		default:
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockFull(%s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
 		}
+	case "weight_session_layer_stack_trit":
+		switch len(args) {
+		case 4:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLayerStackTrit(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+		case 5:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLayerStackTritG(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		case 6:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLayerStackTritGM(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		case 7:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLayerStackTritGMB(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLayerStackTritFull(%s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+		}
+	case "weight_session_forward_block_trit":
+		switch len(args) {
+		case 4:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockTrit(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+		case 5:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockTritG(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		case 6:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockTritGM(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		case 7:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockTritGMB(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardBlockTritFull(%s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+		}
+	case "weight_session_prepack_trit_csv":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionPrepackTritCSV(%s, %s, %s)\n", tmp, args[0], args[1], args[2])
 	case "load_gguf_window":
 		fmt.Fprintf(g.b, "\t%s := biLoadGgufWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
 	case "load_safetensors_window":

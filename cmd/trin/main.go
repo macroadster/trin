@@ -14,7 +14,7 @@ import (
 	"github.com/ericchien/trin/internal/parser"
 )
 
-const version = "1.08.0-go"
+const version = "1.09.0-go"
 
 func main() {
 	if len(os.Args) < 2 {

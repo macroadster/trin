@@ -168,3 +168,131 @@ func TestLayerStackClosedSession(t *testing.T) {
 		t.Fatal("expected closed")
 	}
 }
+
+func TestLayerStackTritParityAndCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack_trit.gguf")
+	// dim=4 two square layers — larger than tiny so packed words exercise
+	dim := 4
+	W0 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	W1 := []float32{
+		0.5, 0, 0, 0,
+		0, 0.5, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0.5, 0.5,
+	}
+	g0 := []float32{1, 1, 1, 1}
+	g1 := []float32{1, 1, 1, 1}
+	if err := WriteGGUFF32(path,
+		map[string][]float32{"W0": W0, "W1": W1, "g0": g0, "g1": g1},
+		map[string][]uint64{"W0": {4, 4}, "W1": {4, 4}, "g0": {4}, "g1": {4}},
+		map[string]string{"general.name": "stack-trit"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+
+	x := []float32{1, 2, 3, 4}
+	eps := 1e-6
+
+	// prepack once
+	built, hits, err := s.PrepackTritCSV("W0,W1", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built != 2 || hits != 0 {
+		t.Fatalf("prepack first built=%d hits=%d", built, hits)
+	}
+	built2, hits2, err := s.PrepackTritCSV("W0,W1", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built2 != 0 || hits2 != 2 {
+		t.Fatalf("prepack second built=%d hits=%d", built2, hits2)
+	}
+
+	// manual composition via LinearTritCached full-tile absmean
+	refManual := func(bitplane bool) []float32 {
+		y0, _, err := s.LinearTritCached("W0", x, dim, dim, bitplane)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h0 := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			h0[i] = x[i] + y0[i]
+		}
+		n0 := RMSNormF32(h0, eps, g0)
+		y1, _, err := s.LinearTritCached("W1", n0, dim, dim, bitplane)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h1 := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			h1[i] = n0[i] + y1[i]
+		}
+		return RMSNormF32(h1, eps, g1)
+	}
+	for _, bp := range []bool{false, true} {
+		ref := refManual(bp)
+		got, err := s.LayerStackTritCSV("W0,W1", "g0,g1", "residual,residual", x, dim, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ref {
+			if !near(ref[i], got[i]) {
+				t.Fatalf("bp=%v i=%d ref=%v got=%v", bp, i, ref[i], got[i])
+			}
+		}
+		// block stack compose
+		b0, err := s.ForwardBlockTrit(LayerSpec{WName: "W0", GainName: "g0", Mode: "residual"}, x, dim, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b1, err := s.ForwardBlockTrit(LayerSpec{WName: "W1", GainName: "g1", Mode: "residual"}, b0, dim, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ref {
+			if !near(ref[i], b1[i]) {
+				t.Fatalf("block compose bp=%v i=%d", bp, i)
+			}
+		}
+	}
+
+	// plain mode: no residual
+	plain, err := s.ForwardBlockTrit(LayerSpec{WName: "W0", GainName: "g0", Mode: "plain"}, x, dim, true, eps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ylin, _, err := s.LinearTritCached("W0", x, dim, dim, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pref := RMSNormF32(ylin, eps, g0)
+	for i := range pref {
+		if !near(pref[i], plain[i]) {
+			t.Fatalf("plain i=%d %v vs %v", i, pref[i], plain[i])
+		}
+	}
+
+	// packs still present
+	if !s.HasTritPack("W0") || !s.HasTritPack("W1") {
+		t.Fatal("packs dropped unexpectedly")
+	}
+
+	if _, err := s.LayerStackTritCSV("", "", "", x, dim, true, eps); err == nil {
+		t.Fatal("empty layers")
+	}
+	if _, err := s.LayerStackTritCSV("W0", "", "", x, 99, true, eps); err == nil {
+		t.Fatal("bad dim")
+	}
+}

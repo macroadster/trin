@@ -1,0 +1,91 @@
+// v1.09 — multi-layer residual stack on session trit prepack cache
+// Fixture: demos/weights/layer_stack.gguf (W0,W1 dim=3 + gains g0,g1)
+// Prepack linears once, chain residual/plain blocks, parity block↔stack.
+
+fn main() {
+    let id = open_weight_session("demos/weights/layer_stack.gguf");
+    let x = [1.0, 2.0, 3.0];
+    let dim = 3;
+    let eps = 0.000001;
+    let bp = 1;
+
+    // ---- prepack W0,W1 once ----
+    let p1 = weight_session_prepack_trit_csv(id, "W0,W1", dim);
+    let p2 = weight_session_prepack_trit_csv(id, "W0,W1", dim);
+    println(str_concat("prepack_built=", to_str(p1[0])));
+    println(str_concat("prepack_hits1=", to_str(p1[1])));
+    println(str_concat("prepack_built2=", to_str(p2[0])));
+    println(str_concat("prepack_hits2=", to_str(p2[1])));
+    println(str_concat("has_W0=", to_str(weight_session_has_trit_pack(id, "W0"))));
+    println(str_concat("has_W1=", to_str(weight_session_has_trit_pack(id, "W1"))));
+
+    // one residual block
+    let b0 = weight_session_forward_block_trit(id, "W0", x, dim, "g0", "residual", bp, eps);
+    println(str_concat("b0=", to_str(b0)));
+
+    // two-layer stack
+    let y = weight_session_layer_stack_trit(id, "W0,W1", x, dim, "g0,g1", "residual,residual", bp, eps);
+    println(str_concat("y=", to_str(y)));
+
+    // compose manually via blocks for parity
+    let m1 = weight_session_forward_block_trit(id, "W0", x, dim, "g0", "residual", bp, eps);
+    let m2 = weight_session_forward_block_trit(id, "W1", m1, dim, "g1", "residual", bp, eps);
+    println(str_concat("m2=", to_str(m2)));
+    let d0r = y[0] - m2[0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = y[1] - m2[1];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let d2r = y[2] - m2[2];
+    let d2 = (d2r < 0.0) | (0.0 - d2r) | d2r;
+    let stack_match = (d0 < 0.0001) * (d1 < 0.0001) * (d2 < 0.0001);
+    println(str_concat("stack_match=", to_str(stack_match)));
+
+    // plain mode drops residual
+    let p = weight_session_forward_block_trit(id, "W0", x, dim, "g0", "plain", bp, eps);
+    println(str_concat("plain=", to_str(p)));
+
+    // scalar vs bitplane stack parity on same packs
+    let ys = weight_session_layer_stack_trit(id, "W0,W1", x, dim, "g0,g1", "residual,residual", 0, eps);
+    let pdr0 = y[0] - ys[0];
+    let pd0 = (pdr0 < 0.0) | (0.0 - pdr0) | pdr0;
+    let pdr1 = y[1] - ys[1];
+    let pd1 = (pdr1 < 0.0) | (0.0 - pdr1) | pdr1;
+    let pdr2 = y[2] - ys[2];
+    let pd2 = (pdr2 < 0.0) | (0.0 - pdr2) | pdr2;
+    let plane_ok = (pd0 < 0.0001) * (pd1 < 0.0001) * (pd2 < 0.0001);
+    println(str_concat("plane_ok=", to_str(plane_ok)));
+
+    // uncached full-tile linear_trit residual composition vs cached stack
+    let r0 = weight_session_linear_trit(id, "W0", x, dim, dim, dim, 0);
+    let y0u = r0[0];
+    let h0 = [x[0] + y0u[0], x[1] + y0u[1], x[2] + y0u[2]];
+    let n0 = span_mul(rmsnorm(h0, eps, 1.0), weight_session_window(id, "g0", 0, dim));
+    let r1 = weight_session_linear_trit(id, "W1", n0, dim, dim, dim, 0);
+    let y1u = r1[0];
+    let h1 = [n0[0] + y1u[0], n0[1] + y1u[1], n0[2] + y1u[2]];
+    let n1 = span_mul(rmsnorm(h1, eps, 1.0), weight_session_window(id, "g1", 0, dim));
+    let ur0 = n1[0] - y[0];
+    let ua0 = (ur0 < 0.0) | (0.0 - ur0) | ur0;
+    let ur1 = n1[1] - y[1];
+    let ua1 = (ur1 < 0.0) | (0.0 - ur1) | ur1;
+    let ur2 = n1[2] - y[2];
+    let ua2 = (ur2 < 0.0) | (0.0 - ur2) | ur2;
+    let uncached_ok = (ua0 < 0.0001) * (ua1 < 0.0001) * (ua2 < 0.0001);
+    println(str_concat("uncached_ok=", to_str(uncached_ok)));
+
+    // packs still present after multi-call reuse
+    let packs_after = weight_session_has_trit_pack(id, "W0") * weight_session_has_trit_pack(id, "W1");
+    let p3 = weight_session_prepack_trit_csv(id, "W0,W1", dim);
+    println(str_concat("packs_after=", to_str(packs_after)));
+    println(str_concat("prepack_after_hits=", to_str(p3[1])));
+
+    let hit_ok = (p1[0] == 2) * (p1[1] == 0) * (p2[0] == 0) * (p2[1] == 2)
+        * packs_after * (p3[1] == 2);
+    let parity_ok = stack_match * plane_ok * uncached_ok;
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("weight_session_layer_stack_trit_ok=", to_str(hit_ok * parity_ok)));
+    println("weight_session_layer_stack_trit_ok");
+
+    close_weight_session(id);
+}

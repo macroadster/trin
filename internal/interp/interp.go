@@ -9869,6 +9869,95 @@ func (it *Interpreter) installBuiltins() {
 		return f32SliceToSpan(y), nil
 	})
 
+	// weight_session_layer_stack_trit(id, wCSV, x, dim [, gainCSV] [, modeCSV] [, bitplane] [, eps])
+	// Trit-cached residual stack (v1.09): prepack once, reuse packs per layer.
+	nat("weight_session_layer_stack_trit", func(args []Value) (Value, error) {
+		if len(args) < 4 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_layer_stack_trit(id, wCSV, x, dim [, gainCSV] [, modeCSV] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_layer_stack_trit: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		dim := args[3].AsInt()
+		gainCSV, modeCSV := "", ""
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 5 {
+			gainCSV = strArg(args[4])
+		}
+		if len(args) >= 6 {
+			modeCSV = strArg(args[5])
+		}
+		if len(args) >= 7 {
+			bitplane = args[6].AsFloat() != 0 || args[6].AsInt() != 0
+		}
+		if len(args) >= 8 {
+			eps = args[7].AsFloat()
+		}
+		y, err := s.LayerStackTritCSV(strArg(args[1]), gainCSV, modeCSV, x, dim, bitplane, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_layer_stack_trit: " + err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+	// weight_session_forward_block_trit(id, wName, x, dim [, gainName] [, mode] [, bitplane] [, eps])
+	nat("weight_session_forward_block_trit", func(args []Value) (Value, error) {
+		if len(args) < 4 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_forward_block_trit(id, wName, x, dim [, gainName] [, mode] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_block_trit: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		dim := args[3].AsInt()
+		gainName, mode := "", "residual"
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 5 {
+			gainName = strArg(args[4])
+		}
+		if len(args) >= 6 {
+			mode = strArg(args[5])
+		}
+		if len(args) >= 7 {
+			bitplane = args[6].AsFloat() != 0 || args[6].AsInt() != 0
+		}
+		if len(args) >= 8 {
+			eps = args[7].AsFloat()
+		}
+		y, err := s.ForwardBlockTrit(weights.LayerSpec{WName: strArg(args[1]), GainName: gainName, Mode: mode}, x, dim, bitplane, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_block_trit: " + err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+	// weight_session_prepack_trit_csv(id, wCSV, K) → [built, hits]
+	nat("weight_session_prepack_trit_csv", func(args []Value) (Value, error) {
+		if len(args) < 3 {
+			return Void(), &Error{Msg: "weight_session_prepack_trit_csv(id, wCSV, K)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_prepack_trit_csv: " + err.Error()}
+		}
+		built, hits, err := s.PrepackTritCSV(strArg(args[1]), args[2].AsInt())
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_prepack_trit_csv: " + err.Error()}
+		}
+		return Span([]Value{I32(built), I32(hits)}), nil
+	})
+
 	// weight_session_linear_fused(id, name, x, M, K [, tileRows]) → span[f32] (v0.89 block-stream)
 	nat("weight_session_linear_fused", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

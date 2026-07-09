@@ -2082,4 +2082,17 @@ grep -q 'tiny_gguf_decode_trit_ok' /tmp/trin_ggufdec_trit_n.txt
 grep -q 'cache_hit_ok=1' /tmp/trin_ggufdec_trit_n.txt
 grep -q 'parity_ok=1' /tmp/trin_ggufdec_trit_n.txt
 
-echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar + session linear_trit + trit prepack cache + decode trit cache)"
+echo "[llm] v1.09 layer stack trit residual"
+./trin run examples/weight_session_layer_stack_trit.trin | tee /tmp/trin_stack_trit_i.txt
+grep -q 'weight_session_layer_stack_trit_ok' /tmp/trin_stack_trit_i.txt
+grep -q 'cache_hit_ok=1' /tmp/trin_stack_trit_i.txt
+grep -q 'parity_ok=1' /tmp/trin_stack_trit_i.txt
+grep -q 'stack_match=1' /tmp/trin_stack_trit_i.txt
+grep -q 'uncached_ok=1' /tmp/trin_stack_trit_i.txt
+./trin build examples/weight_session_layer_stack_trit.trin -o build/weight_session_layer_stack_trit --backend go
+./build/weight_session_layer_stack_trit | tee /tmp/trin_stack_trit_n.txt
+grep -q 'weight_session_layer_stack_trit_ok' /tmp/trin_stack_trit_n.txt
+grep -q 'cache_hit_ok=1' /tmp/trin_stack_trit_n.txt
+grep -q 'parity_ok=1' /tmp/trin_stack_trit_n.txt
+
+echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar + session linear_trit + trit prepack cache + decode trit cache + layer stack trit)"
