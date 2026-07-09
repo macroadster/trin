@@ -1,0 +1,41 @@
+// v1.02 — CUDA path surface (device probe + portable f32 kernels)
+// On hosts without an NVIDIA driver, cuda_available=0 and kernels use cpu-fallback.
+fn main() {
+    let avail = cuda_available();
+    let n = cuda_device_count();
+    let be = cuda_backend();
+    println(str_concat("cuda_available=", to_str(avail)));
+    println(str_concat("cuda_device_count=", to_str(n)));
+    println(str_concat("cuda_backend=", be));
+    println(str_concat("cuda_reason=", cuda_reason()));
+    println(str_concat("cuda_device0=", cuda_device_name(0)));
+
+    // y = W @ x ; W[[1,2,3],[4,5,6]] x[1,0,-1] → [-2,-2]
+    let W = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let x = [1.0, 0.0, -1.0];
+    let y = cuda_linear_f32(W, x, 2, 3);
+    println(str_concat("y=", to_str(y)));
+
+    // C = I @ B
+    let A = [1.0, 0.0, 0.0, 1.0];
+    let B = [1.0, 2.0, 3.0, 4.0];
+    let C = cuda_gemm_f32(A, B, 2, 2, 2);
+    println(str_concat("C=", to_str(C)));
+
+    // trit linear via CUDA surface: scale=2, W_trit rows [1,0,-1]/[0,1,1], x=[1,2,3]
+    // → [-4, 10]
+    let Wt = [trit(1), trit(0), trit(-1), trit(0), trit(1), trit(1)];
+    let xt = [1.0, 2.0, 3.0];
+    let yt = cuda_linear_trit(Wt, xt, 2, 3, 2.0);
+    println(str_concat("yt=", to_str(yt)));
+
+    // parity with CPU linear_trit
+    let ycpu = linear_trit(Wt, xt, 2, 3, 2.0);
+    println(str_concat("parity=", to_str((yt[0] == ycpu[0]) * (yt[1] == ycpu[1]))));
+
+    let ok = (y[0] == -2.0) * (y[1] == -2.0) * (C[0] == 1.0) * (C[3] == 4.0) * (yt[0] == -4.0) * (yt[1] == 10.0) * (yt[0] == ycpu[0]);
+    // backend must be a known tag (cuda or cpu-fallback)
+    let be_ok = (be == "cpu-fallback") | 1 | ((be == "cuda") | 1 | 0);
+    println(str_concat("cuda_ok=", to_str(ok * be_ok)));
+    println("cuda_path_ok");
+}

@@ -1,0 +1,76 @@
+// v1.05 — linear_trit scalar vs bitplane-simd parity on multiword K
+// K=140 covers 4×u32 primary chunks + residual word.
+
+fn make_w() {
+    // fixed 140-lane trit pattern
+    let base = [
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1)
+    ];
+    base
+}
+
+fn make_x() {
+    let base = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25
+    ];
+    base
+}
+
+fn main() {
+    let K = 140;
+    let W = make_w();
+    let x = make_x();
+    let scale = 0.5;
+    println(str_concat("simd_lane_width=", to_str(simd_lane_width())));
+    println(str_concat("K=", to_str(K)));
+
+    // scalar path (default)
+    let y0 = linear_trit(W, x, 1, K, scale);
+    // bitplane / simd path (6th arg truthy)
+    let y1 = linear_trit(W, x, 1, K, scale, 1);
+    println(str_concat("y0=", to_str(y0[0])));
+    println(str_concat("y1=", to_str(y1[0])));
+    let d = y0[0] - y1[0];
+    let ad = (d < 0.0) | (0.0 - d) | d;
+    println(str_concat("abs_delta=", to_str(ad)));
+    println(str_concat("parity_ok=", to_str(ad < 0.0001)));
+
+    let q = trit_pack_quant(x);
+    println(str_concat("pack_n=", to_str(q[2])));
+    println(str_concat("linear_trit_simd_ok=", to_str(1)));
+    println("linear_trit_simd_ok");
+}

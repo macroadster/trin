@@ -1,0 +1,114 @@
+// v1.04 — real multi-tensor GGUF session + char vocab → greedy decode with KV
+// Fixture: demos/weights/tiny_llm.gguf (vocab=8 dim=4 hidden=8, 1 layer)
+// Prompt "AB" tokenized via vocab table; generate 3 tokens greedily.
+
+fn main() {
+    let vid = open_vocab("demos/weights/tiny_llm.vocab");
+    let prompt = "AB";
+    let ids = vocab_encode(vid, prompt);
+    println(str_concat("prompt=", prompt));
+    println(str_concat("prompt_ids=", to_str(ids)));
+    println(str_concat("prompt_tok=", vocab_decode(vid, ids)));
+
+    let sid = open_weight_session("demos/weights/tiny_llm.gguf");
+    let names = weight_session_list(sid);
+    println(str_concat("n_tensors=", to_str(len(names))));
+    let meta = weight_session_meta(sid, "general.name");
+    println(str_concat("meta=", meta));
+
+    let dim = 4;
+    let vocab = 8;
+    let hidden = 8;
+
+    // load embeddings once (small); weights stay session-tiled via fused linear
+    let E = weight_session_tensor(sid, "tok_emb");
+    println(str_concat("emb_len=", to_str(len(E))));
+
+    // prompt tokens
+    let t0 = ids[0];
+    let t1 = ids[1];
+
+    // empty KV
+    let Kc = kv_new();
+    let Vc = kv_new();
+
+    // ---- pos 0 ----
+    let x0 = embed_row(E, t0, dim);
+    let g0 = weight_session_window(sid, "attn_norm", 0, dim);
+    // rmsnorm with unit scale first (builtin scale), then gain via span_mul if needed
+    let x0n = rmsnorm(x0, 0.000001, 1.0);
+    let x0n = span_mul(x0n, g0);
+    let empty = [];
+    let a0s = weight_session_attn(sid, "attn_q", "attn_k", "attn_v", x0n, empty, empty, dim, dim, "attn_o", 1, 0.0, 0.0, 1);
+    let a0 = a0s[0];
+    let Kc = a0s[1];
+    let Vc = a0s[2];
+    let h0 = residual_add(x0, a0);
+    let g1 = weight_session_window(sid, "ffn_norm", 0, dim);
+    let h0n = span_mul(rmsnorm(h0, 0.000001, 1.0), g1);
+    let u0 = silu(weight_session_linear_fused(sid, "ffn_up", h0n, hidden, dim, 4));
+    let f0 = weight_session_linear_fused(sid, "ffn_down", u0, dim, hidden, 4);
+    let y0 = residual_add(h0, f0);
+
+    // ---- pos 1 (last prompt) ----
+    let x1 = embed_row(E, t1, dim);
+    let x1n = span_mul(rmsnorm(x1, 0.000001, 1.0), g0);
+    let a1s = weight_session_attn(sid, "attn_q", "attn_k", "attn_v", x1n, Kc, Vc, dim, dim, "attn_o", 1, 1.0, 0.0, 1);
+    let a1 = a1s[0];
+    let Kc = a1s[1];
+    let Vc = a1s[2];
+    let h1 = residual_add(x1, a1);
+    let h1n = span_mul(rmsnorm(h1, 0.000001, 1.0), g1);
+    let u1 = silu(weight_session_linear_fused(sid, "ffn_up", h1n, hidden, dim, 4));
+    let f1 = weight_session_linear_fused(sid, "ffn_down", u1, dim, hidden, 4);
+    let y1 = residual_add(h1, f1);
+    let logits1 = weight_session_linear_fused(sid, "lm_head", y1, vocab, dim, 4);
+    let gtok1 = sample_logits(logits1, 0.0);
+    println(str_concat("gen1=", to_str(gtok1)));
+    println(str_concat("gen1_tok=", vocab_token(vid, gtok1)));
+    println(str_concat("kv_toks=", to_str(kv_len(Kc, dim))));
+
+    // ---- gen pos 2 ----
+    let x2 = embed_row(E, gtok1, dim);
+    let x2n = span_mul(rmsnorm(x2, 0.000001, 1.0), g0);
+    let a2s = weight_session_attn(sid, "attn_q", "attn_k", "attn_v", x2n, Kc, Vc, dim, dim, "attn_o", 1, 2.0, 0.0, 1);
+    let a2 = a2s[0];
+    let Kc = a2s[1];
+    let Vc = a2s[2];
+    let h2 = residual_add(x2, a2);
+    let h2n = span_mul(rmsnorm(h2, 0.000001, 1.0), g1);
+    let u2 = silu(weight_session_linear_fused(sid, "ffn_up", h2n, hidden, dim, 4));
+    let f2 = weight_session_linear_fused(sid, "ffn_down", u2, dim, hidden, 4);
+    let y2 = residual_add(h2, f2);
+    let logits2 = weight_session_linear_fused(sid, "lm_head", y2, vocab, dim, 4);
+    let gtok2 = sample_logits(logits2, 0.0);
+    println(str_concat("gen2=", to_str(gtok2)));
+    println(str_concat("gen2_tok=", vocab_token(vid, gtok2)));
+
+    // ---- gen pos 3 ----
+    let x3 = embed_row(E, gtok2, dim);
+    let x3n = span_mul(rmsnorm(x3, 0.000001, 1.0), g0);
+    let a3s = weight_session_attn(sid, "attn_q", "attn_k", "attn_v", x3n, Kc, Vc, dim, dim, "attn_o", 1, 3.0, 0.0, 1);
+    let a3 = a3s[0];
+    let Kc = a3s[1];
+    let Vc = a3s[2];
+    let h3 = residual_add(x3, a3);
+    let h3n = span_mul(rmsnorm(h3, 0.000001, 1.0), g1);
+    let u3 = silu(weight_session_linear_fused(sid, "ffn_up", h3n, hidden, dim, 4));
+    let f3 = weight_session_linear_fused(sid, "ffn_down", u3, dim, hidden, 4);
+    let y3 = residual_add(h3, f3);
+    let logits3 = weight_session_linear_fused(sid, "lm_head", y3, vocab, dim, 4);
+    let gtok3 = sample_logits(logits3, 0.0);
+    println(str_concat("gen3=", to_str(gtok3)));
+    println(str_concat("gen3_tok=", vocab_token(vid, gtok3)));
+    println(str_concat("final_kv_toks=", to_str(kv_len(Kc, dim))));
+
+    let out_ids = [gtok1, gtok2, gtok3];
+    let out_txt = vocab_decode(vid, out_ids);
+    println(str_concat("gen_text=", out_txt));
+    println(str_concat("decode_ok=", to_str((len(ids) == 2) * (kv_len(Kc, dim) == 4) * (gtok1 >= 0) * (gtok1 < vocab))));
+
+    close_weight_session(sid);
+    close_vocab(vid);
+    println("tiny_gguf_decode_ok");
+}

@@ -307,6 +307,12 @@ span_concat(a,b)
 RMSNorm → RoPE → ternary Linear attention/FFN → lm_head → greedy decode** program
 that both interprets and compiles. `tiny_ternary_llm_kv.trin` is the same path with
 growing KV via `kv_append`.
+`examples/vocab_table.trin` exercises `open_vocab` / `vocab_encode` / `vocab_decode` / `load_text`.
+`examples/tiny_gguf_decode.trin` loads multi-tensor `demos/weights/tiny_llm.gguf` via a weight
+session, tokenizes prompt `"AB"`, runs session attn + fused FFN/lm_head with growing KV, and
+greedily decodes three tokens on CPU (no CUDA).
+`examples/linear_trit_simd.trin` checks scalar vs bitplane `linear_trit` parity on K=140.
+`examples/bpe_sidecar.trin` loads local `tiny_bpe.vocab` + `tiny_bpe.merges` and encodes `"ABC"`.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -331,7 +337,7 @@ growing KV via `kv_append`.
 |---|---|
 | Deterministic interpret == Go-backend native for LLM builtins | C backend incomplete for new I/O on some hosts |
 | Loop/for sugar: `when`/`over`/`for-in` + `range` desugar to ternary/map | Go ternary evaluates both arms before soft-select |
-| Absmean quantize + scaled trit Linear match bitplane GEMM math | CUDA still unsupported |
+| Absmean quantize + scaled trit Linear match bitplane GEMM math | Competitive CUDA tok/s still out of scope |
 | GGUF v2/v3 LE + common block quants + **IQ1 (S/M) + IQ2 family + IQ3 (XXS/S) + IQ4_NL/XS** + **TQ1_0/TQ2_0** + **MXFP4/NVFP4** + **multi-shard** → f32 | Network fetch out of scope |
 | mmap (syscall) open for GGUF + safetensors; multi-shard auto-walk via sessions | Dequant still allocates the f32 output span |
 | Retained weight sessions: multi-tensor load without re-open | Sessions are process-local int32 handles |
@@ -344,16 +350,25 @@ growing KV via `kv_append`.
 | Attention + multi-head (`mha`) + RoPE + RMSNorm + SiLU block composable | `gqa_expand_kv` / `weight_session_gqa` for GQA |
 | Greedy / argmax / seeded categorical & top-k sampling (LCG) | Hardware CSPRNG not used — intentional for reproducible demos |
 | KV cache as row-major span + append/len/row helpers | Not a distinct GC'd tensor type; user owns layout |
-| Additive API — no bulk renames of pre-0.81 symbols | Competitive CUDA tok/s is out of scope |
+| Additive CUDA path: probe + f32/trit kernels with cpu-fallback | Real PTX/CUBLAS multi-GPU still out of scope |
+| Char/token table tokenizer + load_text; multi-tensor GGUF session greedy decode demo | Network model fetch out of scope |
+| Packed bitplane `linear_trit` set-bit accumulate (v1.05) + scalar 4-unroll | Competitive tok/s still out of scope |
+| BPE sidecar `open_bpe` / merges file (local ranks, v1.05) | Full HF sentencepiece proto & network fetch out of scope |
 
-### Acceptance (v1.01)
+### Acceptance (v1.05)
 
-- `go test` green (parser loop sugar + interp demo + weights)
-- `bash scripts/e2e_native.sh` green including `loop_sugar`
-- `./trin build examples/loop_sugar.trin` shows `loop_sugar_ok=1`
+- `go test` green (weights trit_matvec + BPE; interp vocab/decode/bpe/simd demos)
+- `bash scripts/e2e_native.sh` green including `linear_trit_simd` + `bpe_sidecar` + `tiny_gguf_decode`
+- `./trin run examples/linear_trit_simd.trin` shows `linear_trit_simd_ok` / `parity_ok=1`
+- `./trin run examples/bpe_sidecar.trin` shows `bpe_sidecar_ok` / `match_abc=1`
+- Prior v1.04 decode demos still pass (`tiny_gguf_decode_ok`, `decode_ok=1`)
 
 ## Next
 
+- v1.05: packed bitplane `linear_trit` throughput path + local BPE sidecar merges loader
+- v1.04: char/token table tokenizer + multi-tensor GGUF session greedy decode (CPU)
+- v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
+- v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons: CUDA
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto
 

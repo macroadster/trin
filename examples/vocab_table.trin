@@ -1,0 +1,29 @@
+// v1.04 — char/token table tokenizer surface
+fn main() {
+    // inline vocab (one token per line)
+    let vid = load_vocab_text("<pad>\nA\nB\nC\nD\nE\nF\n<eos>\n");
+    println(str_concat("size=", to_str(vocab_size(vid))));
+    let ids = vocab_encode(vid, "AB");
+    println(str_concat("ids=", to_str(ids)));
+    println(str_concat("ids_match=", to_str((ids[0] == 1) * (ids[1] == 2) * (len(ids) == 2))));
+    let s = vocab_decode(vid, ids);
+    println(str_concat("decoded=", s));
+    println(str_concat("dec_match=", to_str((s == "AB"))));
+    let eos = vocab_encode(vid, "<eos>");
+    println(str_concat("eos_id=", to_str(eos[0])));
+    println(str_concat("eos_match=", to_str(eos[0] == 7)));
+    println(str_concat("tokA=", vocab_token(vid, 1)));
+    println(str_concat("idB=", to_str(vocab_id(vid, "B"))));
+    close_vocab(vid);
+
+    // file vocab
+    let fid = open_vocab("demos/weights/tiny_llm.vocab");
+    let ids2 = vocab_encode(fid, "AB");
+    println(str_concat("file_ids=", to_str(ids2)));
+    println(str_concat("file_match=", to_str((ids2[0] == 1) * (ids2[1] == 2))));
+    let txt = load_text("demos/weights/tiny_llm.vocab");
+    println(str_concat("vocab_bytes=", to_str(str_len(txt))));
+    close_vocab(fid);
+    println(str_concat("vocab_ok=", to_str(1)));
+    println("vocab_table_ok");
+}

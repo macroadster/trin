@@ -1,0 +1,61 @@
+// v1.03 — CUDA PTX emission, offline cubin, buffer stubs, plan_launch
+fn main() {
+    // baseline path still works
+    let be = cuda_backend();
+    println(str_concat("cuda_backend=", be));
+
+    let arch = cuda_ptx_arch();
+    println(str_concat("cuda_ptx_arch=", arch));
+
+    let ptxas = cuda_ptxas_available();
+    println(str_concat("cuda_ptxas_available=", to_str(ptxas)));
+
+    let src = cuda_ptx_source("linear_f32");
+    println(str_concat("ptx_has_entry=", to_str(str_len(src) > 100)));
+    // entry name must appear in PTX text
+    // (interpreter returns full kernel; native go returns stub with same entry tag)
+    let ptx_bytes = cuda_ptx_bytes("linear_f32");
+    let ptx_g = cuda_ptx_bytes("gemm_f32");
+    let ptx_t = cuda_ptx_bytes("linear_trit");
+    println(str_concat("ptx_bytes_linear=", to_str(ptx_bytes)));
+    println(str_concat("ptx_bytes_gemm=", to_str(ptx_g)));
+    println(str_concat("ptx_bytes_trit=", to_str(ptx_t)));
+
+    let cub = cuda_compile_ptx("linear_f32");
+    println(str_concat("cubin_linear=", to_str(cub)));
+    let cub_b = cuda_cubin_bytes("linear_f32");
+    println(str_concat("cubin_bytes=", to_str(cub_b)));
+
+    let plan = cuda_plan_launch("linear_f32");
+    // plan: [would, backend, reason, entry, ptx, cubin, ptxas]
+    println(str_concat("plan_would=", to_str(plan[0])));
+    println(str_concat("plan_backend=", plan[1]));
+    println(str_concat("plan_entry=", plan[3]));
+    println(str_concat("plan_ptx=", to_str(plan[4])));
+    println(str_concat("plan_ptxas=", to_str(plan[6])));
+
+    // host-backed device buffer round-trip
+    let id = cuda_alloc_f32(4);
+    let ncopy = cuda_copy_hto_d(id, [1.0, -2.0, 0.5, 3.25]);
+    println(str_concat("copy_n=", to_str(ncopy)));
+    let blen = cuda_buffer_len(id);
+    println(str_concat("buf_len=", to_str(blen)));
+    let back = cuda_copy_dto_h(id, 4);
+    println(str_concat("back=", to_str(back)));
+    cuda_free(id);
+
+    // numeric fallback still correct
+    let W = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let x = [1.0, 0.0, -1.0];
+    let y = cuda_linear_f32(W, x, 2, 3);
+    println(str_concat("y=", to_str(y)));
+
+    let ok_plan = (plan[0] == 0) * (plan[1] == "cpu-fallback") * (plan[4] > 0);
+    let ok_buf = (ncopy == 4) * (blen == 4) * (back[0] == 1.0) * (back[1] == -2.0);
+    let ok_y = (y[0] == -2.0) * (y[1] == -2.0);
+    let ok_ptx = (ptx_bytes > 100) * (ptx_g > 100) * (ptx_t > 100) * (str_len(src) > 50);
+    // cubin may be 0 if ptxas missing in PATH for native stubs; interpreter uses real ptxas when present
+    let ok = ok_plan * ok_buf * ok_y * ok_ptx;
+    println(str_concat("cuda_ptx_ok=", to_str(ok)));
+    println("cuda_ptx_path_ok");
+}

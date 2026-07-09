@@ -1983,4 +1983,59 @@ grep -q 'kv_sample_ok' /tmp/trin_kv_n.txt
 ./build/tiny_ternary_llm_kv | tee /tmp/trin_tiny_kv_n.txt
 grep -q 'tiny_ternary_llm_kv_ok' /tmp/trin_tiny_kv_n.txt
 
-echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample)"
+
+echo "[cuda] v1.02 CUDA path surface"
+./trin run examples/cuda_path.trin | tee /tmp/trin_cuda_i.txt
+grep -q 'cuda_path_ok' /tmp/trin_cuda_i.txt
+grep -q 'cuda_ok=1' /tmp/trin_cuda_i.txt
+./trin build examples/cuda_path.trin -o build/cuda_path --backend go
+./build/cuda_path | tee /tmp/trin_cuda_n.txt
+grep -q 'cuda_path_ok' /tmp/trin_cuda_n.txt
+grep -q 'cuda_ok=1' /tmp/trin_cuda_n.txt
+
+
+echo "[cuda] v1.03 CUDA PTX layer"
+./trin run examples/cuda_ptx.trin | tee /tmp/trin_cudaptx_i.txt
+grep -q 'cuda_ptx_path_ok' /tmp/trin_cudaptx_i.txt
+grep -q 'cuda_ptx_ok=1' /tmp/trin_cudaptx_i.txt
+./trin build examples/cuda_ptx.trin -o build/cuda_ptx --backend go
+./build/cuda_ptx | tee /tmp/trin_cudaptx_n.txt
+grep -q 'cuda_ptx_path_ok' /tmp/trin_cudaptx_n.txt
+grep -q 'cuda_ptx_ok=1' /tmp/trin_cudaptx_n.txt
+
+
+echo "[llm] v1.04 tokenizer + GGUF session greedy decode"
+./trin run examples/vocab_table.trin | tee /tmp/trin_vocab_i.txt
+grep -q 'vocab_table_ok' /tmp/trin_vocab_i.txt
+grep -q 'vocab_ok=1' /tmp/trin_vocab_i.txt
+./trin build examples/vocab_table.trin -o build/vocab_table --backend go
+./build/vocab_table | tee /tmp/trin_vocab_n.txt
+grep -q 'vocab_table_ok' /tmp/trin_vocab_n.txt
+grep -q 'vocab_ok=1' /tmp/trin_vocab_n.txt
+go run scripts/gen_tiny_llm_gguf.go . >/tmp/trin_gen_tiny.txt
+./trin run examples/tiny_gguf_decode.trin | tee /tmp/trin_ggufdec_i.txt
+grep -q 'tiny_gguf_decode_ok' /tmp/trin_ggufdec_i.txt
+grep -q 'decode_ok=1' /tmp/trin_ggufdec_i.txt
+grep -q 'final_kv_toks=4' /tmp/trin_ggufdec_i.txt
+./trin build examples/tiny_gguf_decode.trin -o build/tiny_gguf_decode --backend go
+./build/tiny_gguf_decode | tee /tmp/trin_ggufdec_n.txt
+grep -q 'tiny_gguf_decode_ok' /tmp/trin_ggufdec_n.txt
+grep -q 'decode_ok=1' /tmp/trin_ggufdec_n.txt
+
+echo "[llm] v1.05 linear_trit simd + BPE sidecar"
+./trin run examples/linear_trit_simd.trin | tee /tmp/trin_ltsimd_i.txt
+grep -q 'linear_trit_simd_ok' /tmp/trin_ltsimd_i.txt
+grep -q 'parity_ok=1' /tmp/trin_ltsimd_i.txt
+./trin build examples/linear_trit_simd.trin -o build/linear_trit_simd --backend go
+./build/linear_trit_simd | tee /tmp/trin_ltsimd_n.txt
+grep -q 'linear_trit_simd_ok' /tmp/trin_ltsimd_n.txt
+grep -q 'parity_ok=1' /tmp/trin_ltsimd_n.txt
+./trin run examples/bpe_sidecar.trin | tee /tmp/trin_bpe_i.txt
+grep -q 'bpe_sidecar_ok' /tmp/trin_bpe_i.txt
+grep -q 'match_abc=1' /tmp/trin_bpe_i.txt
+./trin build examples/bpe_sidecar.trin -o build/bpe_sidecar --backend go
+./build/bpe_sidecar | tee /tmp/trin_bpe_n.txt
+grep -q 'bpe_sidecar_ok' /tmp/trin_bpe_n.txt
+grep -q 'match_abc=1' /tmp/trin_bpe_n.txt
+
+echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar)"

@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.01.0-go  
+**Version:** 1.05.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -9,13 +9,20 @@ S/M**, **full IQ2 family XXS/XS/S**, **IQ3 XXS/S**, **IQ4_NL/XS**, **TQ1_0/TQ2_0
 **mmap opens**, **retained weight sessions**, **windowed partial decode**,
 **session-backed tiled linear**, **fused quant linear**, **multi-layer residual
 session runner**, **session-wired multi-head attention**, **GQA packing
-helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`).
+helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
+(device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
+cpu-fallback when no NVIDIA driver is present),
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05).
 
 ## What is production-ready
 
 1–18. Through v1.00 stack (sessions, fused linear, MHA, GQA, full IQ*/TQ/MXFP, multi-shard)
 19. **Loop/for sugar (v1.01)** — `when g do e`, `over xs as x do e`, `for x in xs do e` desugar to ternary/map; `range(n|[lo,hi]|[lo,hi,step])` span builder
-20–22. Linear trit, transformer cores, KV/sample, toolchain, verification
+20. **CUDA path (v1.02)** — `cuda_available` / `cuda_device_count` / `cuda_backend` / `cuda_reason` / `cuda_device_name` + `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` (cpu-fallback without driver)
+21. **CUDA PTX layer (v1.03)** — PTX emitters for linear/GEMM/trit, optional `ptxas` cubin, `cuda_plan_launch`, host-backed `cuda_alloc_f32` buffers
+22. **Tokenizer + GGUF decode (v1.04)** — `open_vocab` / `vocab_encode` / `vocab_decode` / `load_text` + multi-tensor `tiny_llm.gguf` session greedy decode with KV
+23. **SIMD trit matvec + BPE sidecar (v1.05)** — packed set-bit `linear_trit` bitplane path + `open_bpe` / `bpe_encode` local merges
+24–26. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -54,11 +61,73 @@ No new control combinators — only desugar onto `gate \| pure \| each` + `map`.
 | MXFP4  | 39 | 32 / 17 B | E8M0 e + 16 nibble E2M1 qs |
 | NVFP4  | 40 | 64 / 36 B | 4×UE4M3 scales + 32 nibble E2M1 qs |
 
-Still unsupported (clear error): CUDA.
+Still unsupported (clear error): live driver kernel launch (cuModuleLoad/cuLaunch), CUBLAS, multi-GPU.
+
+## CUDA path (v1.02)
+
+| Builtin | Role |
+|---------|------|
+| `cuda_available()` | 1 if NVIDIA driver/device nodes visible |
+| `cuda_device_count()` | probed device count (0 here) |
+| `cuda_backend()` | `"cuda"` or `"cpu-fallback"` |
+| `cuda_reason()` | short probe note |
+| `cuda_device_name(i)` | device label or `""` |
+| `cuda_linear_f32(W,x,M,K)` | row-major matvec |
+| `cuda_gemm_f32(A,B,M,K,N)` | row-major GEMM |
+| `cuda_linear_trit(W,x,M,K,scale)` | scaled trit matvec |
+
+Force fallback: `TRIN_CUDA=0`. Real kernels need host driver + `/dev/nvidia*`.
+
+### PTX layer (v1.03)
+
+| Builtin | Role |
+|---------|------|
+| `cuda_ptxas_available()` | 1 if offline `ptxas` found |
+| `cuda_ptx_arch()` | `sm_*` (default `sm_75`, override `TRIN_CUDA_ARCH`) |
+| `cuda_ptx_source(kind)` | full PTX text (`linear_f32`/`gemm_f32`/`linear_trit`) |
+| `cuda_ptx_bytes(kind)` / `cuda_cubin_bytes(kind)` | sizes |
+| `cuda_compile_ptx(kind)` | offline cubin size (0 if no ptxas) |
+| `cuda_plan_launch(kind)` | `[would, backend, reason, entry, ptx, cubin, ptxas]` |
+| `cuda_alloc_f32` / `cuda_copy_hto_d` / `cuda_copy_dto_h` / `cuda_free` | host-backed device buffer stubs |
+
+Entries: `trin_linear_f32`, `trin_gemm_f32`, `trin_linear_trit`. Driver kernel launch still deferred.
+
+
+## Tokenizer + GGUF decode (v1.04)
+
+| Builtin | Role |
+|---------|------|
+| `open_vocab(path)` / `close_vocab(id)` | retained one-token-per-line vocab session |
+| `load_vocab_text(text)` | inline newline-separated vocab |
+| `vocab_size(id)` | number of tokens |
+| `vocab_encode(id, prompt)` | greedy longest-match → `span[i32]` |
+| `vocab_decode(id, ids)` | join ids → string |
+| `vocab_token(id, i)` / `vocab_id(id, tok)` | single lookups |
+| `load_text(path)` | raw file → string |
+
+Fixture `demos/weights/tiny_llm.gguf` is a 10-tensor one-block toy (vocab=8, dim=4, hidden=8)
+with sidecar `tiny_llm.vocab`. Demo `examples/tiny_gguf_decode.trin` opens the session,
+tokenizes prompt `"AB"`, runs session attn + fused FFN/lm_head, grows KV, greedily emits 3 tokens.
+
+CUDA device launch remains deferred; this release is the CPU end-to-end path.
+
+
+## SIMD trit matvec + BPE (v1.05)
+
+| Builtin / API | Role |
+|---|---|
+| `linear_trit(W,x,M,K,scale)` | scalar 4-unroll mixed matvec |
+| `linear_trit(..., 1)` 6th arg | packed pos/neg word set-bit accumulate (128-lane primary) |
+| `open_bpe(vocab, merges)` / `close_bpe` | retained BPE session (local files) |
+| `bpe_encode` / `bpe_decode` / `bpe_token` | rank-ordered merges encode |
+| `bpe_vocab_size` / `bpe_merge_count` | session metadata |
+
+Fixtures: `demos/weights/tiny_bpe.vocab` + `tiny_bpe.merges`. Demos: `linear_trit_simd.trin`, `bpe_sidecar.trin`.
 
 ## Limits
 
-- CUDA out of scope.
+- CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
+- Multi-GPU out of scope.
 - Go-backend ternary still evaluates both arms then soft-selects (side-effect
   short-circuit only in interpreter hard paths).
 
@@ -67,7 +136,21 @@ Still unsupported (clear error): CUDA.
 - [x] `when` / `over` / `for-in` parse → Ternary/map desugar
 - [x] `range` interp + Go native (`biRange`)
 - [x] Demo `examples/loop_sugar.trin` interpret + native
-- [x] Version `1.01.0-go`
+- [x] CUDA package probe + f32/trit kernels (`internal/cuda`)
+- [x] Interpreter + Go/C backend `cuda_*` builtins
+- [x] Demo `examples/cuda_path.trin` interpret + native
+- [x] PTX emitters + ptxas cubin (`internal/cuda`)
+- [x] Demo `examples/cuda_ptx.trin` interpret + native
+- [x] Version `1.03.0-go`
+- [x] Char vocab package (`internal/weights/tokenizer.go`)
+- [x] Interpreter + Go backend `vocab_*` / `load_text`
+- [x] Fixture `demos/weights/tiny_llm.gguf` + `.vocab`
+- [x] Demo `examples/vocab_table.trin` interpret + native
+- [x] Demo `examples/tiny_gguf_decode.trin` interpret + native
+- [x] Version `1.04.0-go`
+- [x] Packed bitplane `linear_trit` + unit tests
+- [x] BPE sidecar package + `examples/bpe_sidecar.trin`
+- [x] Version `1.05.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -75,7 +158,13 @@ Still unsupported (clear error): CUDA.
 ```bash
 export PATH="$PATH:$HOME/.local/go/bin"
 cd trin
-go test ./internal/parser ./internal/interp ./internal/weights -count=1
-./trin run examples/loop_sugar.trin
+go test ./internal/cuda ./internal/parser ./internal/interp ./internal/weights -count=1
+./trin run examples/cuda_path.trin
+./trin run examples/cuda_ptx.trin
+go run scripts/gen_tiny_llm_gguf.go .
+./trin run examples/vocab_table.trin
+./trin run examples/tiny_gguf_decode.trin
+./trin run examples/linear_trit_simd.trin
+./trin run examples/bpe_sidecar.trin
 bash scripts/e2e_native.sh
 ```

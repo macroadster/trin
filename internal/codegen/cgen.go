@@ -449,6 +449,69 @@ static trin_val bi_trit_dot_planes_simd(trin_val ap,trin_val an,trin_val bp,trin
 static trin_val bi_simd_lane_width(void){ return trin_i32(128); }
 static trin_val bi_hw_vlen(void){ return trin_i32(16); }
 static trin_val bi_hw_isa_code(void){ return trin_i32(0); }
+/* CUDA path (v1.02): C backend always reports cpu-fallback; kernels are scalar. */
+static trin_val bi_cuda_available(void){ return trin_i32(0); }
+static trin_val bi_cuda_device_count(void){ return trin_i32(0); }
+static trin_val bi_cuda_backend(void){ return trin_str_borrow("cpu-fallback"); }
+static trin_val bi_cuda_reason(void){ return trin_str_borrow("c-backend portable stub"); }
+static trin_val bi_cuda_device_name(trin_val iv){ (void)iv; return trin_str_borrow(""); }
+static trin_val bi_cuda_linear_f32(trin_val W, trin_val x, trin_val Mv, trin_val Kv){
+    int M = as_i(Mv), K = as_i(Kv);
+    trin_val *items = calloc(M?M:1, sizeof(trin_val));
+    for(int i=0;i<M;i++){
+        double acc=0;
+        for(int t=0;t<K;t++) acc += as_f(W.items[i*K+t]) * as_f(x.items[t]);
+        items[i]=trin_f32((float)acc);
+    }
+    return trin_span_own(items, M);
+}
+static trin_val bi_cuda_gemm_f32(trin_val A, trin_val B, trin_val Mv, trin_val Kv, trin_val Nv){
+    int M=as_i(Mv), K=as_i(Kv), N=as_i(Nv);
+    trin_val *C = calloc((M*N)?(M*N):1, sizeof(trin_val));
+    for(int i=0;i<M;i++) for(int j=0;j<N;j++){
+        double acc=0;
+        for(int k=0;k<K;k++) acc += as_f(A.items[i*K+k])*as_f(B.items[k*N+j]);
+        C[i*N+j]=trin_f32((float)acc);
+    }
+    return trin_span_own(C, M*N);
+}
+static trin_val bi_cuda_linear_trit(trin_val W, trin_val x, trin_val Mv, trin_val Kv, trin_val scaleV){
+    int M=as_i(Mv), K=as_i(Kv); double scale=as_f(scaleV);
+    trin_val *items=calloc(M?M:1, sizeof(trin_val));
+    for(int i=0;i<M;i++){
+        double acc=0;
+        for(int t=0;t<K;t++){
+            int w=clamp_trit(as_i(W.items[i*K+t]));
+            acc += (double)w * as_f(x.items[t]);
+        }
+        items[i]=trin_f32((float)(scale*acc));
+    }
+    return trin_span_own(items, M);
+}
+static trin_val bi_cuda_ptxas_available(void){ return trin_i32(0); }
+static trin_val bi_cuda_ptx_arch(void){ return trin_str_borrow("sm_75"); }
+static trin_val bi_cuda_ptx_source(trin_val k){ (void)k; return trin_str_borrow(".version 7.8\n.target sm_75\n"); }
+static trin_val bi_cuda_ptx_bytes(trin_val k){ (void)k; return trin_i32(1800); }
+static trin_val bi_cuda_cubin_bytes(trin_val k){ (void)k; return trin_i32(0); }
+static trin_val bi_cuda_plan_launch(trin_val k){
+    (void)k;
+    trin_val *items=calloc(7,sizeof(trin_val));
+    items[0]=trin_i32(0);
+    items[1]=trin_str_borrow("cpu-fallback");
+    items[2]=trin_str_borrow("c-backend portable stub");
+    items[3]=trin_str_borrow("trin_linear_f32");
+    items[4]=trin_i32(1800);
+    items[5]=trin_i32(0);
+    items[6]=trin_i32(0);
+    return trin_span_own(items,7);
+}
+static trin_val bi_cuda_compile_ptx(trin_val k){ (void)k; return trin_i32(0); }
+static trin_val bi_cuda_alloc_f32(trin_val n){ (void)n; return trin_i32(0); }
+static trin_val bi_cuda_free(trin_val id){ (void)id; return trin_void(); }
+static trin_val bi_cuda_copy_hto_d(trin_val id, trin_val sp){ (void)id; (void)sp; return trin_i32(0); }
+static trin_val bi_cuda_copy_dto_h(trin_val id, trin_val n){ (void)id; (void)n; return trin_span_own(calloc(1,sizeof(trin_val)),0); }
+static trin_val bi_cuda_buffer_len(trin_val id){ (void)id; return trin_i32(0); }
+
 static trin_val bi_hw_vlen_for_n(trin_val n){
     int x=as_i(n);
     if(x>=16) return trin_i32(16);
@@ -859,6 +922,50 @@ func (g *gen) emitCall(n *ast.Call, env string) (string, error) {
 		fmt.Fprintf(g.b, "    trin_val %s = bi_hw_vlen();\n", tmp)
 	case "hw_isa_code":
 		fmt.Fprintf(g.b, "    trin_val %s = bi_hw_isa_code();\n", tmp)
+	case "cuda_available":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_available();\n", tmp)
+	case "cuda_device_count":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_device_count();\n", tmp)
+	case "cuda_backend":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_backend();\n", tmp)
+	case "cuda_reason":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_reason();\n", tmp)
+	case "cuda_device_name":
+		if len(args) >= 1 {
+			fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_device_name(%s);\n", tmp, args[0])
+		} else {
+			fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_device_name(trin_i32(0));\n", tmp)
+		}
+	case "cuda_linear_f32":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_linear_f32(%s, %s, %s, %s);\n", tmp, args[0], args[1], args[2], args[3])
+	case "cuda_gemm_f32":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_gemm_f32(%s, %s, %s, %s, %s);\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		case "cuda_linear_trit":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_linear_trit(%s, %s, %s, %s, %s);\n", tmp, args[0], args[1], args[2], args[3], args[4])
+	case "cuda_ptxas_available":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptxas_available();\n", tmp)
+	case "cuda_ptx_arch":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptx_arch();\n", tmp)
+	case "cuda_ptx_source":
+		if len(args)>=1 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptx_source(%s);\n", tmp, args[0]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptx_source(trin_str_borrow(\"linear_f32\"));\n", tmp) }
+	case "cuda_ptx_bytes":
+		if len(args)>=1 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptx_bytes(%s);\n", tmp, args[0]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_ptx_bytes(trin_str_borrow(\"linear_f32\"));\n", tmp) }
+	case "cuda_cubin_bytes":
+		if len(args)>=1 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_cubin_bytes(%s);\n", tmp, args[0]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_cubin_bytes(trin_str_borrow(\"linear_f32\"));\n", tmp) }
+	case "cuda_plan_launch":
+		if len(args)>=1 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_plan_launch(%s);\n", tmp, args[0]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_plan_launch(trin_str_borrow(\"linear_f32\"));\n", tmp) }
+	case "cuda_compile_ptx":
+		if len(args)>=1 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_compile_ptx(%s);\n", tmp, args[0]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_compile_ptx(trin_str_borrow(\"linear_f32\"));\n", tmp) }
+	case "cuda_alloc_f32":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_alloc_f32(%s);\n", tmp, args[0])
+	case "cuda_free":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_free(%s);\n", tmp, args[0])
+	case "cuda_copy_hto_d":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_copy_hto_d(%s, %s);\n", tmp, args[0], args[1])
+	case "cuda_copy_dto_h":
+		if len(args)>=2 { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_copy_dto_h(%s, %s);\n", tmp, args[0], args[1]) } else { fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_copy_dto_h(%s, trin_i32(0));\n", tmp, args[0]) }
+	case "cuda_buffer_len":
+		fmt.Fprintf(g.b, "    trin_val %s = bi_cuda_buffer_len(%s);\n", tmp, args[0])
 	case "hw_vlen_for_n":
 		fmt.Fprintf(g.b, "    trin_val %s = bi_hw_vlen_for_n(%s);\n", tmp, args[0])
 	case "dyn_tile":

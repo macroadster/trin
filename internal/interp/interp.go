@@ -12,6 +12,7 @@ import (
 
 	"github.com/ericchien/trin/internal/ad"
 	"github.com/ericchien/trin/internal/ast"
+	"github.com/ericchien/trin/internal/cuda"
 	"github.com/ericchien/trin/internal/parser"
 	"github.com/ericchien/trin/internal/weights"
 )
@@ -8552,39 +8553,37 @@ func (it *Interpreter) installBuiltins() {
 	// Also accepts bitplane mode when W is already trit span.
 	nat("linear_trit", func(args []Value) (Value, error) {
 		// linear_trit(W, x, M, K, scale) or linear_trit(W, x, M, K, scale, use_bitplane)
+		// bitplane path uses packed pos/neg words + set-bit mixed accumulate (v1.05).
 		if len(args) < 5 || args[0].Kind != VSpan || args[1].Kind != VSpan {
 			return Void(), &Error{Msg: "linear_trit(W, x, M, K, scale [, bitplane])"}
 		}
 		W, x := args[0].Span, args[1].Span
 		M, K := args[2].AsInt(), args[3].AsInt()
-		scale := args[4].AsFloat()
+		scale := float32(args[4].AsFloat())
 		bitplane := false
 		if len(args) >= 6 {
 			bitplane = args[5].AsFloat() != 0 || args[5].AsInt() != 0
 		}
-		if len(W) < M*K || len(x) < K {
+		if M < 0 || K < 0 || len(W) < M*K || len(x) < K {
 			return Void(), &Error{Msg: "linear_trit: dimension mismatch"}
 		}
-		out := make([]Value, M)
-		if bitplane {
-			// pack activation signs? activations stay f32: use scalar path for x
-			// efficient path: for each row pack W, dot with float x via mixed:
-			// still use scalar loop for correctness first
-			for i := 0; i < M; i++ {
-				acc := 0.0
-				for t := 0; t < K; t++ {
-					acc += float64(clampTrit(W[i*K+t].AsInt())) * x[t].AsFloat()
-				}
-				out[i] = F32(scale * acc)
-			}
-			return Span(out), nil
+		Wi := make([]int8, M*K)
+		for i := 0; i < M*K; i++ {
+			Wi[i] = weights.ClampTritInt(W[i].AsInt())
 		}
+		xf := make([]float32, K)
+		for t := 0; t < K; t++ {
+			xf[t] = float32(x[t].AsFloat())
+		}
+		var y []float32
+		if bitplane {
+			y = weights.LinearTritPlanes(Wi, xf, M, K, scale)
+		} else {
+			y = weights.LinearTritScalar(Wi, xf, M, K, scale)
+		}
+		out := make([]Value, M)
 		for i := 0; i < M; i++ {
-			acc := 0.0
-			for t := 0; t < K; t++ {
-				acc += float64(clampTrit(W[i*K+t].AsInt())) * x[t].AsFloat()
-			}
-			out[i] = F32(scale * acc)
+			out[i] = F32(float64(y[i]))
 		}
 		return Span(out), nil
 	})
@@ -10093,6 +10092,466 @@ func (it *Interpreter) installBuiltins() {
 			return I32(1), nil
 		}
 		return I32(0), nil
+	})
+
+	// --- CUDA path (v1.02) — device probe + portable f32 / trit kernels ---
+	// On hosts without NVIDIA driver/devices, cuda_available()=0 and kernels
+	// still run via the package's CPU fallback (same numeric contract).
+
+	// ---- v1.04 char/token table tokenizer + text I/O ----
+	// open_vocab(path) → i32 vocab session id
+	nat("open_vocab", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "open_vocab(path)"}
+		}
+		v, err := weights.OpenVocab(strArg(args[0]))
+		if err != nil {
+			return Void(), &Error{Msg: "open_vocab: " + err.Error()}
+		}
+		return I32(int(v.ID)), nil
+	})
+	// close_vocab(id) → void (idempotent)
+	nat("close_vocab", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "close_vocab(id)"}
+		}
+		_ = weights.CloseVocab(int32(args[0].AsInt()))
+		return Void(), nil
+	})
+	// vocab_size(id) → i32
+	nat("vocab_size", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "vocab_size(id)"}
+		}
+		v, err := weights.GetVocab(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "vocab_size: " + err.Error()}
+		}
+		return I32(v.Size()), nil
+	})
+	// vocab_encode(id, prompt) → span[i32]
+	nat("vocab_encode", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "vocab_encode(id, prompt)"}
+		}
+		v, err := weights.GetVocab(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "vocab_encode: " + err.Error()}
+		}
+		ids := v.Encode(strArg(args[1]))
+		out := make([]Value, len(ids))
+		for i, id := range ids {
+			out[i] = I32(int(id))
+		}
+		return Span(out), nil
+	})
+	// vocab_decode(id, ids) → str  (ids = span[i32])
+	nat("vocab_decode", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "vocab_decode(id, ids)"}
+		}
+		v, err := weights.GetVocab(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "vocab_decode: " + err.Error()}
+		}
+		var ids []int32
+		if args[1].Kind == VSpan {
+			ids = make([]int32, len(args[1].Span))
+			for i, x := range args[1].Span {
+				ids[i] = int32(x.AsInt())
+			}
+		} else {
+			// single id
+			ids = []int32{int32(args[1].AsInt())}
+		}
+		return Str(v.Decode(ids)), nil
+	})
+	// vocab_token(id, tok_id) → str
+	nat("vocab_token", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "vocab_token(id, tok_id)"}
+		}
+		v, err := weights.GetVocab(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "vocab_token: " + err.Error()}
+		}
+		return Str(v.Token(args[1].AsInt())), nil
+	})
+	// vocab_id(id, tok) → i32 (-1 if missing)
+	nat("vocab_id", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "vocab_id(id, tok)"}
+		}
+		v, err := weights.GetVocab(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "vocab_id: " + err.Error()}
+		}
+		return I32(v.IDOf(strArg(args[1]))), nil
+	})
+	// load_text(path) → str
+	nat("load_text", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "load_text(path)"}
+		}
+		b, err := os.ReadFile(strArg(args[0]))
+		if err != nil {
+			return Void(), &Error{Msg: "load_text: " + err.Error()}
+		}
+		return Str(string(b)), nil
+	})
+	// load_vocab_text(text) → i32  (inline vocab, no file)
+	nat("load_vocab_text", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "load_vocab_text(text)"}
+		}
+		v, err := weights.LoadVocabText("<inline>", strArg(args[0]))
+		if err != nil {
+			return Void(), &Error{Msg: "load_vocab_text: " + err.Error()}
+		}
+		return I32(int(v.ID)), nil
+	})
+
+	// ---- v1.05 BPE sidecar tokenizer (local vocab+merges, no network) ----
+	nat("open_bpe", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "open_bpe(vocab_path [, merges_path])"}
+		}
+		vocabPath := strArg(args[0])
+		mergesPath := ""
+		if len(args) >= 2 {
+			mergesPath = strArg(args[1])
+		}
+		t, err := weights.OpenBPE(vocabPath, mergesPath)
+		if err != nil {
+			return Void(), &Error{Msg: "open_bpe: " + err.Error()}
+		}
+		return I32(int(t.ID)), nil
+	})
+	nat("close_bpe", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "close_bpe(id)"}
+		}
+		_ = weights.CloseBPE(int32(args[0].AsInt()))
+		return Void(), nil
+	})
+	nat("bpe_vocab_size", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "bpe_vocab_size(id)"}
+		}
+		t, err := weights.GetBPE(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "bpe_vocab_size: " + err.Error()}
+		}
+		return I32(t.VocabSize()), nil
+	})
+	nat("bpe_merge_count", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "bpe_merge_count(id)"}
+		}
+		t, err := weights.GetBPE(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "bpe_merge_count: " + err.Error()}
+		}
+		return I32(t.MergeCount()), nil
+	})
+	nat("bpe_encode", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "bpe_encode(id, prompt)"}
+		}
+		t, err := weights.GetBPE(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "bpe_encode: " + err.Error()}
+		}
+		ids := t.Encode(strArg(args[1]))
+		out := make([]Value, len(ids))
+		for i, id := range ids {
+			out[i] = I32(int(id))
+		}
+		return Span(out), nil
+	})
+	nat("bpe_decode", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "bpe_decode(id, ids)"}
+		}
+		t, err := weights.GetBPE(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "bpe_decode: " + err.Error()}
+		}
+		var ids []int32
+		if args[1].Kind == VSpan {
+			ids = make([]int32, len(args[1].Span))
+			for i, x := range args[1].Span {
+				ids[i] = int32(x.AsInt())
+			}
+		} else {
+			ids = []int32{int32(args[1].AsInt())}
+		}
+		return Str(t.Decode(ids)), nil
+	})
+	nat("bpe_token", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "bpe_token(id, tok_id)"}
+		}
+		t, err := weights.GetBPE(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "bpe_token: " + err.Error()}
+		}
+		return Str(t.Token(args[1].AsInt())), nil
+	})
+
+	nat("cuda_available", func(args []Value) (Value, error) {
+		if cuda.Available() {
+			return I32(1), nil
+		}
+		return I32(0), nil
+	})
+	nat("cuda_device_count", func(args []Value) (Value, error) {
+		return I32(cuda.DeviceCount()), nil
+	})
+	nat("cuda_backend", func(args []Value) (Value, error) {
+		return Str(cuda.Backend()), nil
+	})
+	nat("cuda_reason", func(args []Value) (Value, error) {
+		return Str(cuda.Reason()), nil
+	})
+	nat("cuda_device_name", func(args []Value) (Value, error) {
+		idx := 0
+		if len(args) >= 1 {
+			idx = args[0].AsInt()
+		}
+		return Str(cuda.DeviceName(idx)), nil
+	})
+	// cuda_linear_f32(W, x, M, K) → f32 span[M]
+	nat("cuda_linear_f32", func(args []Value) (Value, error) {
+		if len(args) < 4 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_linear_f32(W, x, M, K)"}
+		}
+		M, K := args[2].AsInt(), args[3].AsInt()
+		Wsp, xsp := args[0].Span, args[1].Span
+		W := make([]float32, len(Wsp))
+		for i, v := range Wsp {
+			W[i] = float32(v.AsFloat())
+		}
+		x := make([]float32, len(xsp))
+		for i, v := range xsp {
+			x[i] = float32(v.AsFloat())
+		}
+		y, err := cuda.LinearF32(W, x, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+	// cuda_gemm_f32(A, B, M, K, N) → f32 span[M*N]
+	nat("cuda_gemm_f32", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_gemm_f32(A, B, M, K, N)"}
+		}
+		M, K, N := args[2].AsInt(), args[3].AsInt(), args[4].AsInt()
+		Asp, Bsp := args[0].Span, args[1].Span
+		A := make([]float32, len(Asp))
+		for i, v := range Asp {
+			A[i] = float32(v.AsFloat())
+		}
+		B := make([]float32, len(Bsp))
+		for i, v := range Bsp {
+			B[i] = float32(v.AsFloat())
+		}
+		C, err := cuda.GemmF32(A, B, M, K, N)
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(C), nil
+	})
+	// cuda_linear_trit(W_trit, x, M, K, scale) → f32 span[M]
+	nat("cuda_linear_trit", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_linear_trit(W, x, M, K, scale)"}
+		}
+		M, K := args[2].AsInt(), args[3].AsInt()
+		scale := float32(args[4].AsFloat())
+		Wspan := args[0].Span
+		if len(Wspan) < M*K {
+			return Void(), &Error{Msg: "cuda_linear_trit: dimension mismatch"}
+		}
+		W := make([]int32, M*K)
+		for i := 0; i < M*K; i++ {
+			W[i] = int32(Wspan[i].AsInt())
+		}
+		xsp := args[1].Span
+		x := make([]float32, len(xsp))
+		for i, v := range xsp {
+			x[i] = float32(v.AsFloat())
+		}
+		y, err := cuda.LinearTrit(W, x, M, K, scale)
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+
+
+	// --- CUDA PTX layer (v1.03) ---
+	nat("cuda_ptxas_available", func(args []Value) (Value, error) {
+		if cuda.PTXASAvailable() {
+			return I32(1), nil
+		}
+		return I32(0), nil
+	})
+	nat("cuda_ptx_arch", func(args []Value) (Value, error) {
+		return Str(cuda.PTXArch()), nil
+	})
+	// cuda_ptx_source(kind) kind: linear_f32 | gemm_f32 | linear_trit
+	nat("cuda_ptx_source", func(args []Value) (Value, error) {
+		kind := "linear_f32"
+		if len(args) >= 1 {
+			kind = strArg(args[0])
+		}
+		var mod cuda.PTXModule
+		switch kind {
+		case "linear_f32", "cuda_linear_f32", cuda.PTXLinearF32Entry:
+			mod = cuda.EmitLinearF32PTX("")
+		case "gemm_f32", "cuda_gemm_f32", cuda.PTXGemmF32Entry:
+			mod = cuda.EmitGemmF32PTX("")
+		case "linear_trit", "cuda_linear_trit", cuda.PTXLinearTritEntry:
+			mod = cuda.EmitLinearTritPTX("")
+		default:
+			return Void(), &Error{Msg: "cuda_ptx_source(kind): want linear_f32|gemm_f32|linear_trit"}
+		}
+		return Str(mod.Source), nil
+	})
+	nat("cuda_ptx_bytes", func(args []Value) (Value, error) {
+		kind := "linear_f32"
+		if len(args) >= 1 {
+			kind = strArg(args[0])
+		}
+		st := cuda.PlanLaunch(kind)
+		return I32(st.PTXBytes), nil
+	})
+	nat("cuda_cubin_bytes", func(args []Value) (Value, error) {
+		kind := "linear_f32"
+		if len(args) >= 1 {
+			kind = strArg(args[0])
+		}
+		st := cuda.PlanLaunch(kind)
+		return I32(st.CubinBytes), nil
+	})
+	// cuda_plan_launch(kind) → span[would(i32), backend(str), reason(str), entry(str), ptx(i32), cubin(i32), ptxas(i32)]
+	nat("cuda_plan_launch", func(args []Value) (Value, error) {
+		kind := "linear_f32"
+		if len(args) >= 1 {
+			kind = strArg(args[0])
+		}
+		st := cuda.PlanLaunch(kind)
+		would := 0
+		if st.WouldLaunch {
+			would = 1
+		}
+		ptxas := 0
+		if st.PTXAS {
+			ptxas = 1
+		}
+		return Span([]Value{
+			I32(would),
+			Str(st.Backend),
+			Str(st.Reason),
+			Str(st.Entry),
+			I32(st.PTXBytes),
+			I32(st.CubinBytes),
+			I32(ptxas),
+		}), nil
+	})
+	// cuda_compile_ptx(kind) → i32 cubin byte count (0 if ptxas missing / fail)
+	nat("cuda_compile_ptx", func(args []Value) (Value, error) {
+		kind := "linear_f32"
+		if len(args) >= 1 {
+			kind = strArg(args[0])
+		}
+		var mod cuda.PTXModule
+		switch kind {
+		case "linear_f32", "cuda_linear_f32", cuda.PTXLinearF32Entry:
+			mod = cuda.EmitLinearF32PTX("")
+		case "gemm_f32", "cuda_gemm_f32", cuda.PTXGemmF32Entry:
+			mod = cuda.EmitGemmF32PTX("")
+		case "linear_trit", "cuda_linear_trit", cuda.PTXLinearTritEntry:
+			mod = cuda.EmitLinearTritPTX("")
+		default:
+			return Void(), &Error{Msg: "cuda_compile_ptx(kind)"}
+		}
+		cub, err := cuda.CompilePTX(mod)
+		if err != nil {
+			return I32(0), nil // soft fail — host may lack ptxas
+		}
+		return I32(len(cub.Bytes)), nil
+	})
+	// cuda_alloc_f32(n) → i32 handle
+	nat("cuda_alloc_f32", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "cuda_alloc_f32(n)"}
+		}
+		b, err := cuda.AllocF32(args[0].AsInt())
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return I32(int(cuda.RegisterBuffer(b))), nil
+	})
+	nat("cuda_free", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "cuda_free(id)"}
+		}
+		cuda.FreeBuffer(int32(args[0].AsInt()))
+		return Void(), nil
+	})
+	// cuda_copy_hto_d(id, span) → i32 n
+	nat("cuda_copy_hto_d", func(args []Value) (Value, error) {
+		if len(args) < 2 || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_copy_hto_d(id, span)"}
+		}
+		b, err := cuda.GetBuffer(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		sp := args[1].Span
+		src := make([]float32, len(sp))
+		for i, v := range sp {
+			src[i] = float32(v.AsFloat())
+		}
+		if err := b.CopyHtoD(src); err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return I32(len(src)), nil
+	})
+	// cuda_copy_dto_h(id, n) → f32 span
+	nat("cuda_copy_dto_h", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "cuda_copy_dto_h(id [, n])"}
+		}
+		b, err := cuda.GetBuffer(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		n := b.N
+		if len(args) >= 2 {
+			n = args[1].AsInt()
+		}
+		if n > b.N {
+			n = b.N
+		}
+		dst := make([]float32, n)
+		if err := b.CopyDtoH(dst); err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(dst), nil
+	})
+	nat("cuda_buffer_len", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "cuda_buffer_len(id)"}
+		}
+		b, err := cuda.GetBuffer(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return I32(b.N), nil
 	})
 
 	_ = math.Abs

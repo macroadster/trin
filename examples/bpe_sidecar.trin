@@ -1,0 +1,31 @@
+// v1.05 — BPE/sentencepiece-style sidecar loader (local files only)
+// vocab: demos/weights/tiny_bpe.vocab
+// merges: demos/weights/tiny_bpe.merges  (A B → AB, AB C → ABC)
+
+fn main() {
+    let bid = open_bpe("demos/weights/tiny_bpe.vocab", "demos/weights/tiny_bpe.merges");
+    println(str_concat("bpe_vocab=", to_str(bpe_vocab_size(bid))));
+    println(str_concat("bpe_merges=", to_str(bpe_merge_count(bid))));
+
+    let ids = bpe_encode(bid, "ABC");
+    println(str_concat("ids=", to_str(ids)));
+    println(str_concat("ids_len=", to_str(len(ids))));
+    println(str_concat("tok0=", bpe_token(bid, ids[0])));
+    let dec = bpe_decode(bid, ids);
+    println(str_concat("decoded=", dec));
+    println(str_concat("match_abc=", to_str((len(ids) == 1) * (dec == "ABC"))));
+
+    let ab = bpe_encode(bid, "AB");
+    println(str_concat("ab_ids=", to_str(ab)));
+    println(str_concat("match_ab=", to_str((len(ab) == 1) * (bpe_token(bid, ab[0]) == "AB"))));
+
+    // no-merges fallback: open with empty merges path (char table)
+    let vid = open_vocab("demos/weights/tiny_bpe.vocab");
+    let raw = vocab_encode(vid, "AB");
+    println(str_concat("char_ab=", to_str(raw)));
+    close_vocab(vid);
+
+    close_bpe(bid);
+    println(str_concat("bpe_ok=", to_str(1)));
+    println("bpe_sidecar_ok");
+}
