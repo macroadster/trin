@@ -1,0 +1,191 @@
+// v1.11 — tiny GGUF decode on session trit-attn (projections from prepack cache)
+// Fixture: demos/weights/tiny_llm.gguf (vocab=8 dim=4 hidden=8, 1 layer)
+// Prepack Q/K/V/O/FFN/lm_head once; attention via weight_session_attn_trit
+// (growing KV + RoPE); FFN/lm_head via weight_session_linear_trit_cached.
+// Parity target: manual linear_trit_cached + rope + attn compose (same absmean
+// trit math as v1.08); greedy tokens match tiny_gguf_decode_trit (not f32 fused).
+
+fn main() {
+    let vid = open_vocab("demos/weights/tiny_llm.vocab");
+    let prompt = "AB";
+    let ids = vocab_encode(vid, prompt);
+    println(str_concat("prompt=", prompt));
+    println(str_concat("prompt_ids=", to_str(ids)));
+
+    let sid = open_weight_session("demos/weights/tiny_llm.gguf");
+    let dim = 4;
+    let vocab = 8;
+    let hidden = 8;
+    let bp = 1;
+    let ropeBase = 10000.0;
+    let E = weight_session_tensor(sid, "tok_emb");
+    let g_attn = weight_session_window(sid, "attn_norm", 0, dim);
+    let g_ffn = weight_session_window(sid, "ffn_norm", 0, dim);
+    let empty = [];
+
+    // ---- prepack once (K = in-features) ----
+    let b_q1 = weight_session_prepack_trit(sid, "attn_q", dim);
+    let b_k1 = weight_session_prepack_trit(sid, "attn_k", dim);
+    let b_v1 = weight_session_prepack_trit(sid, "attn_v", dim);
+    let b_o1 = weight_session_prepack_trit(sid, "attn_o", dim);
+    let b_u1 = weight_session_prepack_trit(sid, "ffn_up", dim);
+    let b_d1 = weight_session_prepack_trit(sid, "ffn_down", hidden);
+    let b_h1 = weight_session_prepack_trit(sid, "lm_head", dim);
+    let b_q2 = weight_session_prepack_trit(sid, "attn_q", dim);
+    let b_u2 = weight_session_prepack_trit(sid, "ffn_up", dim);
+    let b_h2 = weight_session_prepack_trit(sid, "lm_head", dim);
+    println(str_concat("prepack_q_built=", to_str(b_q1)));
+    println(str_concat("prepack_q_hit=", to_str(b_q2)));
+    println(str_concat("prepack_up_built=", to_str(b_u1)));
+    println(str_concat("prepack_up_hit=", to_str(b_u2)));
+    println(str_concat("prepack_head_built=", to_str(b_h1)));
+    println(str_concat("prepack_head_hit=", to_str(b_h2)));
+    let packs = weight_session_has_trit_pack(sid, "attn_q")
+        * weight_session_has_trit_pack(sid, "attn_k")
+        * weight_session_has_trit_pack(sid, "attn_v")
+        * weight_session_has_trit_pack(sid, "attn_o")
+        * weight_session_has_trit_pack(sid, "ffn_up")
+        * weight_session_has_trit_pack(sid, "ffn_down")
+        * weight_session_has_trit_pack(sid, "lm_head");
+    println(str_concat("all_packs_present=", to_str(packs)));
+
+    // parity: attn_trit step0 vs manual cached QKV + rope + attn + O
+    let t0 = ids[0];
+    let x0 = embed_row(E, t0, dim);
+    let x0n = span_mul(rmsnorm(x0, 0.000001, 1.0), g_attn);
+    let a0m_q = weight_session_linear_trit_cached(sid, "attn_q", x0n, dim, dim, bp)[0];
+    let a0m_k = weight_session_linear_trit_cached(sid, "attn_k", x0n, dim, dim, bp)[0];
+    let a0m_v = weight_session_linear_trit_cached(sid, "attn_v", x0n, dim, dim, bp)[0];
+    let a0m_qr = rope(a0m_q, 0.0, ropeBase);
+    let a0m_kr = rope(a0m_k, 0.0, ropeBase);
+    let a0m_a = attn(a0m_qr, a0m_kr, a0m_v, dim);
+    let a0m = weight_session_linear_trit_cached(sid, "attn_o", a0m_a, dim, dim, bp)[0];
+    let a0s = weight_session_attn_trit(sid, "attn_q", "attn_k", "attn_v", x0n, empty, empty, dim, dim, "attn_o", 1, 0.0, ropeBase, bp);
+    let a0 = a0s[0];
+    let Kc = a0s[1];
+    let Vc = a0s[2];
+    let d0r = a0[0] - a0m[0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = a0[3] - a0m[3];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let parity_attn0 = (d0 < 0.0001) * (d1 < 0.0001);
+    println(str_concat("parity_attn0_delta0=", to_str(d0)));
+    println(str_concat("parity_attn0_ok=", to_str(parity_attn0)));
+    println(str_concat("kv0_len=", to_str(len(Kc))));
+
+    // finish pos 0 FFN on residual
+    let h0 = residual_add(x0, a0);
+    let h0n = span_mul(rmsnorm(h0, 0.000001, 1.0), g_ffn);
+    let u0 = silu(weight_session_linear_trit_cached(sid, "ffn_up", h0n, hidden, dim, bp)[0]);
+    let f0 = weight_session_linear_trit_cached(sid, "ffn_down", u0, dim, hidden, bp)[0];
+    let y0 = residual_add(h0, f0);
+
+    // ---- pos 1 (last prompt) ----
+    let t1 = ids[1];
+    let x1 = embed_row(E, t1, dim);
+    let x1n = span_mul(rmsnorm(x1, 0.000001, 1.0), g_attn);
+    let a1s = weight_session_attn_trit(sid, "attn_q", "attn_k", "attn_v", x1n, Kc, Vc, dim, dim, "attn_o", 1, 1.0, ropeBase, bp);
+    let a1 = a1s[0];
+    let Kc = a1s[1];
+    let Vc = a1s[2];
+    let h1 = residual_add(x1, a1);
+    let h1n = span_mul(rmsnorm(h1, 0.000001, 1.0), g_ffn);
+    let u1 = silu(weight_session_linear_trit_cached(sid, "ffn_up", h1n, hidden, dim, bp)[0]);
+    let f1 = weight_session_linear_trit_cached(sid, "ffn_down", u1, dim, hidden, bp)[0];
+    let y1 = residual_add(h1, f1);
+    let logits1 = weight_session_linear_trit_cached(sid, "lm_head", y1, vocab, dim, bp)[0];
+    let gtok1 = sample_logits(logits1, 0.0);
+    println(str_concat("gen1=", to_str(gtok1)));
+    println(str_concat("gen1_tok=", vocab_token(vid, gtok1)));
+    println(str_concat("kv_toks=", to_str(kv_len(Kc, dim))));
+
+    // ---- gen pos 2 ----
+    let x2 = embed_row(E, gtok1, dim);
+    let x2n = span_mul(rmsnorm(x2, 0.000001, 1.0), g_attn);
+    let a2s = weight_session_attn_trit(sid, "attn_q", "attn_k", "attn_v", x2n, Kc, Vc, dim, dim, "attn_o", 1, 2.0, ropeBase, bp);
+    let a2 = a2s[0];
+    let Kc = a2s[1];
+    let Vc = a2s[2];
+    let h2 = residual_add(x2, a2);
+    let h2n = span_mul(rmsnorm(h2, 0.000001, 1.0), g_ffn);
+    let u2 = silu(weight_session_linear_trit_cached(sid, "ffn_up", h2n, hidden, dim, bp)[0]);
+    let f2 = weight_session_linear_trit_cached(sid, "ffn_down", u2, dim, hidden, bp)[0];
+    let y2 = residual_add(h2, f2);
+    let logits2 = weight_session_linear_trit_cached(sid, "lm_head", y2, vocab, dim, bp)[0];
+    let gtok2 = sample_logits(logits2, 0.0);
+    println(str_concat("gen2=", to_str(gtok2)));
+    println(str_concat("gen2_tok=", vocab_token(vid, gtok2)));
+
+    // ---- gen pos 3 ----
+    let x3 = embed_row(E, gtok2, dim);
+    let x3n = span_mul(rmsnorm(x3, 0.000001, 1.0), g_attn);
+    let a3s = weight_session_attn_trit(sid, "attn_q", "attn_k", "attn_v", x3n, Kc, Vc, dim, dim, "attn_o", 1, 3.0, ropeBase, bp);
+    let a3 = a3s[0];
+    let Kc = a3s[1];
+    let Vc = a3s[2];
+    let h3 = residual_add(x3, a3);
+    let h3n = span_mul(rmsnorm(h3, 0.000001, 1.0), g_ffn);
+    let u3 = silu(weight_session_linear_trit_cached(sid, "ffn_up", h3n, hidden, dim, bp)[0]);
+    let f3 = weight_session_linear_trit_cached(sid, "ffn_down", u3, dim, hidden, bp)[0];
+    let y3 = residual_add(h3, f3);
+    let logits3 = weight_session_linear_trit_cached(sid, "lm_head", y3, vocab, dim, bp)[0];
+    let gtok3 = sample_logits(logits3, 0.0);
+    println(str_concat("gen3=", to_str(gtok3)));
+    println(str_concat("gen3_tok=", vocab_token(vid, gtok3)));
+    println(str_concat("final_kv_toks=", to_str(kv_len(Kc, dim))));
+
+    let out_ids = [gtok1, gtok2, gtok3];
+    let out_txt = vocab_decode(vid, out_ids);
+    println(str_concat("gen_text=", out_txt));
+
+    // packs still present after multi-token reuse
+    let packs_after = weight_session_has_trit_pack(sid, "attn_q")
+        * weight_session_has_trit_pack(sid, "attn_k")
+        * weight_session_has_trit_pack(sid, "attn_v")
+        * weight_session_has_trit_pack(sid, "attn_o")
+        * weight_session_has_trit_pack(sid, "ffn_up")
+        * weight_session_has_trit_pack(sid, "lm_head");
+    let b_q3 = weight_session_prepack_trit(sid, "attn_q", dim);
+    let b_o3 = weight_session_prepack_trit(sid, "attn_o", dim);
+    println(str_concat("packs_after_decode=", to_str(packs_after)));
+    println(str_concat("prepack_q_after_hit=", to_str(b_q3)));
+    println(str_concat("prepack_o_after_hit=", to_str(b_o3)));
+
+    // scalar vs planes head parity on last y (shared packs)
+    let rc_s = weight_session_linear_trit_cached(sid, "lm_head", y3, vocab, dim, 0);
+    let rc_p = weight_session_linear_trit_cached(sid, "lm_head", y3, vocab, dim, 1);
+    let ys = rc_s[0];
+    let yp = rc_p[0];
+    let ss = rc_s[1];
+    let sp = rc_p[1];
+    let pd0r = ys[0] - yp[0];
+    let pd0 = (pd0r < 0.0) | (0.0 - pd0r) | pd0r;
+    let pd1r = ys[7] - yp[7];
+    let pd1 = (pd1r < 0.0) | (0.0 - pd1r) | pd1r;
+    let pdsr = ss - sp;
+    let pds = (pdsr < 0.0) | (0.0 - pdsr) | pdsr;
+    let parity_head = (pd0 < 0.0001) * (pd1 < 0.0001) * (pds < 0.0001);
+    println(str_concat("parity_head_ok=", to_str(parity_head)));
+
+    // token match vs v1.08 trit decode path (EEE)
+    let match_trit = (gtok1 == 5) * (gtok2 == 5) * (gtok3 == 5);
+    println(str_concat("match_trit_decode=", to_str(match_trit)));
+
+    let hit_ok = (b_q1 == 1) * (b_q2 == 0) * (b_k1 == 1) * (b_v1 == 1) * (b_o1 == 1)
+        * (b_u1 == 1) * (b_u2 == 0) * (b_d1 == 1)
+        * (b_h1 == 1) * (b_h2 == 0) * (b_q3 == 0) * (b_o3 == 0)
+        * packs * packs_after;
+    let decode_ok = (len(ids) == 2) * (kv_len(Kc, dim) == 4)
+        * (gtok1 >= 0) * (gtok1 < vocab)
+        * (gtok2 >= 0) * (gtok2 < vocab)
+        * (gtok3 >= 0) * (gtok3 < vocab);
+    let parity_ok = parity_attn0 * parity_head * match_trit;
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("decode_ok=", to_str(decode_ok)));
+    println(str_concat("tiny_gguf_decode_attn_trit_ok=", to_str(hit_ok * parity_ok * decode_ok)));
+    println("tiny_gguf_decode_attn_trit_ok");
+
+    close_weight_session(sid);
+    close_vocab(vid);
+}

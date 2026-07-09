@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.10.0-go  
+**Version:** 1.11.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10), plus **tiny GGUF greedy decode on session trit-attn** (v1.11).
 
 ## What is production-ready
 
@@ -27,7 +27,8 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 26. **Tiny GGUF decode via trit cache (v1.08)** — `examples/tiny_gguf_decode_trit.trin` prepacks Q/K/V/O/FFN/lm_head once and reuses packs across tokens
 27. **Trit residual layer stack (v1.09)** — `weight_session_forward_block_trit` / `weight_session_layer_stack_trit` / `weight_session_prepack_trit_csv`: multi-layer residual or plain blocks on prepacked trit linears + RMSNorm
 28. **Session attn on trit projections (v1.10)** — `weight_session_attn_proj_trit` / `weight_session_attn_trit` / `weight_session_mha_trit` / `weight_session_gqa_trit` (+ GQA proj): prepacked Q/K/V/O linears, f32 attn math, growing KV
-29–31. Linear trit, transformer cores, KV/sample, toolchain, verification
+29. **Tiny GGUF decode via trit-attn (v1.11)** — `examples/tiny_gguf_decode_attn_trit.trin` prepacks once, runs prompt+generate on `weight_session_attn_trit` + cached FFN/lm_head
+30–32. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -187,6 +188,17 @@ Parity target is uncached full-tile `weight_session_linear_trit(..., tileRows=M)
 Demo: `examples/weight_session_attn_trit.trin` on `session_attn.gguf` (`cache_hit_ok=1`, `parity_ok=1`, `proj_ok=1`, `y1_ok=1`, `grow_ok=1`).
 Projections reuse session trit packs; attention scores/values stay f32.
 
+## Tiny GGUF decode on trit-attn (v1.11)
+
+| Piece | Role |
+|---|---|
+| prepack Q/K/V/O + FFN + lm_head | one-shot absmean pack build |
+| `weight_session_attn_trit` | growing-KV step with RoPE + optional O on trit packs |
+| `weight_session_linear_trit_cached` | FFN up/down + lm_head on same packs |
+
+Demo: `examples/tiny_gguf_decode_attn_trit.trin` on `tiny_llm.gguf` (`cache_hit_ok=1`, `parity_ok=1`, `match_trit_decode=1`, `gen_text=EEE`).
+Step-0 attn parity vs manual `linear_trit_cached` + `rope` + `attn` + O; tokens match v1.08 trit decode (not f32 fused).
+
 ## Limits
 
 - CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
@@ -229,6 +241,9 @@ Projections reuse session trit packs; attention scores/values stay f32.
 - [x] Session attn/MHA/GQA on trit-cached projections
 - [x] Demo `weight_session_attn_trit` (hit + proj/y parity + grow)
 - [x] Version `1.10.0-go`
+- [x] Tiny GGUF decode on session trit-attn
+- [x] Demo `tiny_gguf_decode_attn_trit` (hit + step0 parity + match v1.08)
+- [x] Version `1.11.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -243,6 +258,7 @@ go run scripts/gen_tiny_llm_gguf.go .
 ./trin run examples/vocab_table.trin
 ./trin run examples/tiny_gguf_decode.trin
 ./trin run examples/tiny_gguf_decode_trit.trin
+./trin run examples/tiny_gguf_decode_attn_trit.trin
 ./trin run examples/weight_session_layer_stack_trit.trin
 ./trin run examples/weight_session_attn_trit.trin
 ./trin run examples/linear_trit_simd.trin

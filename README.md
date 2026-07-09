@@ -331,6 +331,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/tiny_gguf_decode_trit.trin` prepacks tiny_llm linears once and runs multi-token decode on the hit path.
 `examples/weight_session_layer_stack_trit.trin` prepacks W0,W1 once and chains residual/plain RMSNorm blocks on the trit cache.
 `examples/weight_session_attn_trit.trin` prepacks Q/K/V/O once and runs growing-KV attn/mha on trit-cached projections.
+`examples/tiny_gguf_decode_attn_trit.trin` runs multi-token greedy decode with `weight_session_attn_trit` (+ FFN/lm_head on the same packs).
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -377,16 +378,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Tiny GGUF decode via trit cache (v1.08) | Trit quant tokens may differ from fused-f32 decode |
 | Trit residual stack on prepack cache (v1.09) | Square dim×dim layers; not full attn blocks |
 | Session attn on trit projections (v1.10) | Attention math f32; only projs use trit packs |
+| Tiny GGUF decode via trit-attn (v1.11) | Growing-KV session attn_trit + FFN/lm_head packs |
 
-### Acceptance (v1.10)
+### Acceptance (v1.11)
 
-- `go test` green (weights AttnTrit/GQATrit + interp attn_trit demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_attn_trit`
-- `./trin run examples/weight_session_attn_trit.trin` shows `weight_session_attn_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
-- Prior v1.09 demos still pass (`weight_session_layer_stack_trit_ok`)
+- `go test` green (interp `tiny_gguf_decode_attn_trit` demo)
+- `bash scripts/e2e_native.sh` green including `tiny_gguf_decode_attn_trit`
+- `./trin run examples/tiny_gguf_decode_attn_trit.trin` shows `tiny_gguf_decode_attn_trit_ok` / `cache_hit_ok=1` / `parity_ok=1` / `match_trit_decode=1`
+- Prior v1.10 demos still pass (`weight_session_attn_trit_ok`)
 
 ## Next
 
+- v1.11: multi-token GGUF greedy decode on session trit-attn
 - v1.10: session-wired attn/MHA/GQA on trit-cached projections
 - v1.09: multi-layer residual stack on trit-cached linears
 - v1.08: wire cached trit linear into tiny GGUF decode
@@ -397,5 +400,5 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; full decode loop on trit-attn blocks
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; multi-layer trit-attn decoder
 
