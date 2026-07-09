@@ -1,0 +1,27 @@
+// v0.85 — mmap GGUF / safetensors weight open (list+single-tensor, no full decode)
+fn main() {
+    let m_q4 = weight_file_mapped("demos/weights/W_q4_0.gguf");
+    println(str_concat("mapped_q4=", to_str(m_q4)));
+    let m_st = weight_file_mapped("demos/weights/W.safetensors");
+    println(str_concat("mapped_st=", to_str(m_st)));
+
+    let names = load_gguf_list("demos/weights/W_q4_0.gguf");
+    println(str_concat("names=", to_str(names)));
+    let shape = load_gguf_shape("demos/weights/W_q4_0.gguf", "weight");
+    println(str_concat("shape=", to_str(shape)));
+    let w = load_gguf_tensor("demos/weights/W_q4_0.gguf", "weight");
+    println(str_concat("n=", to_str(len(w))));
+    let q = quantize_absmean(w);
+    let x = [
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25
+    ];
+    let y = linear_trit(q[0], x, 2, 32, q[1]);
+    println(str_concat("y_q4=", to_str(y)));
+
+    let auto_w = load_weight_tensor("demos/weights/W.safetensors", "weight");
+    println(str_concat("auto_n=", to_str(len(auto_w))));
+    println("load_gguf_mmap_ok");
+}

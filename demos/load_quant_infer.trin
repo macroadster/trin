@@ -1,0 +1,19 @@
+// Load f32 weights from CSV, absmean→trit, run linear inference
+fn main() {
+    let w = load_f32_csv("demos/weights/W.csv");
+    println(str_concat("loaded n=", to_str(len(w))));
+    let q = quantize_absmean(w);
+    let tw = q[0];
+    let scale = q[1];
+    // also exercise file quantize sidecar
+    let qf = quantize_file_absmean("demos/weights/W.csv");
+    println(str_concat("file_scale=", to_str(qf[1])));
+    let x = [1.0, 0.5, -1.0];
+    let y = linear_trit(tw, x, 2, 3, scale);
+    println(str_concat("y=", to_str(y)));
+    let n = save_f32_csv("demos/weights/y_out.csv", y);
+    println(str_concat("wrote=", to_str(n)));
+    let tw2 = load_trit_csv("demos/weights/W.csv.trit.csv");
+    println(str_concat("trit_reload=", to_str(tw2)));
+    println("load_quant_infer_ok");
+}

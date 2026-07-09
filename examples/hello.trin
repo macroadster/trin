@@ -1,0 +1,17 @@
+// Trin hello world — only ternary control for the name branch
+// gate | pure | each
+//   if false → each (default stranger)
+//   if true  → pure (Hello world, $username)
+//   soft     → blend (not used here; comparison yields hard bit)
+
+fn main() {
+    let name: str = input("Enter your name: ");
+
+    // (str_len(name) > 0) | personalized | default
+    let msg: str =
+        (str_len(name) > 0)
+            | str_concat("Hello world, ", name)
+            | "Hello world, stranger";
+
+    println(msg);
+}

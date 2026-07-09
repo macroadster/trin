@@ -1,0 +1,41 @@
+// Span-combinator reverse-mode AD (v0.9)
+//
+// sum(span_add([1,2],[3,4])) = 10; da=db=1
+// sum(map_mul(s,[x,y,z])) = s*(x+y+z)
+// composed soft_mux mix y=10, dy/dw=-8, dy/da=0.25, dy/ds=3
+
+fn main() {
+    let a = [1.0, 2.0];
+    let b = [3.0, 4.0];
+    let gsa = grad_span_add(a, b);
+    println(str_concat("sum_add = ", to_str(gsa[0])));
+    println(str_concat("dadd/da0 = ", to_str(gsa[1])));
+    println(str_concat("dadd/db1 = ", to_str(gsa[4])));
+
+    let xs = [1.0, 2.0, 3.0];
+    let gs = grad_scale(2.0, xs);
+    println(str_concat("sum_scale = ", to_str(gs[0])));
+    println(str_concat("dscale/ds = ", to_str(gs[1])));
+    println(str_concat("dscale/dx0 = ", to_str(gs[2])));
+
+    // map_mul is the documented const-scale map subset used for AD
+    let gm = grad_map_mul(2.0, xs);
+    println(str_concat("sum_map = ", to_str(gm[0])));
+    println(str_concat("dmap/ds = ", to_str(gm[1])));
+
+    let names = ["w", "a", "b", "c", "d", "s", "x", "y"];
+    let vals = [0.25, 1.0, 1.0, 1.0, 1.0, 3.0, 2.0, 2.0];
+    let g = grad_expr("soft_mux(w, sum(span_add([a,b],[c,d])), sum(scale(s,[x,y])))", names, vals);
+    println(str_concat("y = ", to_str(g[0])));
+    println(str_concat("dy/dw = ", to_str(g[1])));
+    println(str_concat("dy/da = ", to_str(g[2])));
+    println(str_concat("dy/ds = ", to_str(g[6])));
+
+    // map_mul form in grad_expr
+    let names2 = ["s", "x", "y", "z"];
+    let vals2 = [2.0, 1.0, 2.0, 3.0];
+    let h = grad_expr("sum(map_mul(s, [x,y,z]))", names2, vals2);
+    println(str_concat("loss = ", to_str(h[0])));
+    println(str_concat("dloss/ds = ", to_str(h[1])));
+    println(str_concat("dloss/dx = ", to_str(h[2])));
+}

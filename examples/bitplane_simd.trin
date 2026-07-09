@@ -1,0 +1,72 @@
+// Wider multiword SIMD bitplane path (v0.18)
+// 140 lanes = 5×u32 words → primary 4-word (128) chunk + residual word.
+
+fn make_vec(n: i32, seed: i32) {
+    // Build a deterministic span of length n using nested scan of constants.
+    // Pattern cycles through the hard-coded base if n is known at this size.
+    let base = [
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(1), trit(-1)
+    ];
+    // Use first n elements (n=140 fixed below).
+    base
+}
+
+fn main() {
+    let A = make_vec(140, 0);
+    let B = [
+        trit(-1), trit(1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(-1),
+        trit(1), trit(0), trit(-1), trit(1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(1),
+        trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(1),
+        trit(1), trit(-1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0),
+        trit(-1), trit(0), trit(1), trit(1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0),
+        trit(-1), trit(1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(-1),
+        trit(1), trit(0), trit(-1), trit(1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(1),
+        trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1), trit(0), trit(1),
+        trit(1), trit(-1), trit(0), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0),
+        trit(-1), trit(0), trit(1), trit(1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(1), trit(-1), trit(1)
+    ];
+
+    let n = 140;
+    let Ap = trit_pack_words(A);
+    let Bp = trit_pack_words(B);
+    println(str_concat("simd_lane_width = ", to_str(simd_lane_width())));
+    println(str_concat("n = ", to_str(n)));
+    println(str_concat("nwords = ", to_str(len(Ap[0]))));
+
+    let d0 = trit_dot_planes(Ap[0], Ap[1], Bp[0], Bp[1], n);
+    let d1 = trit_dot_planes_simd(Ap[0], Ap[1], Bp[0], Bp[1], n);
+    println(str_concat("dot scalar-plane = ", to_str(d0)));
+    println(str_concat("dot simd-plane = ", to_str(d1)));
+
+    let Cs = trit_gemm(A, B, 1, n, 1);
+    let Cb = trit_gemm_bitplane(A, B, 1, n, 1);
+    let Cq = trit_gemm_bitplane_simd(A, B, 1, n, 1);
+    println(str_concat("gemm scalar  = ", to_str(Cs)));
+    println(str_concat("gemm bitplane= ", to_str(Cb)));
+    println(str_concat("gemm simd    = ", to_str(Cq)));
+}

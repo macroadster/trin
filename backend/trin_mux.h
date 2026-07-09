@@ -1,0 +1,42 @@
+/* trin_mux.h — virtual ternary helpers for binary metal */
+#ifndef TRIN_MUX_H
+#define TRIN_MUX_H
+
+#include <stdio.h>
+#include <string.h>
+
+/* Soft unit multiplex: out = g*pure + (1-g)*each  (branchless) */
+static inline float trin_soft_mux_f32(float g, float pure, float each) {
+    return g * pure + (1.0f - g) * each;
+}
+
+/* Hard bit select for floats (compiler may emit CMOV/blend) */
+static inline float trin_hard_mux_f32(int bit, float pure, float each) {
+    return bit ? pure : each;
+}
+
+/* Hard bit select for C strings (pointers; not soft-blendable) */
+static inline const char *trin_hard_mux_str(int bit, const char *pure, const char *each) {
+    return bit ? pure : each;
+}
+
+/*
+ * gate | pure | each  on unit:
+ *   w==0 -> each (false / return-default)
+ *   w==1 -> pure
+ *   else -> soft blend
+ * For strings, mid weights snap at 0.5.
+ */
+static inline const char *trin_ternary_str(float gate, const char *pure, const char *each) {
+    if (gate >= 1.0f - 1e-6f) return pure;
+    if (gate <= 1e-6f) return each;
+    return (gate >= 0.5f) ? pure : each;
+}
+
+static inline float trin_ternary_f32(float gate, float pure, float each) {
+    if (gate >= 1.0f - 1e-6f) return pure;
+    if (gate <= 1e-6f) return each;
+    return trin_soft_mux_f32(gate, pure, each);
+}
+
+#endif

@@ -1,0 +1,32 @@
+// v0.87 — windowed / partial tensor decode from retained session + one-shot
+fn main() {
+    // F32 multi-window from one session
+    let id = open_weight_session("demos/weights/toy.gguf");
+    let w0 = weight_session_window(id, "weight", 0, 3);
+    let w1 = weight_session_window(id, "weight", 3, 3);
+    println(str_concat("w0=", to_str(w0)));
+    println(str_concat("w1=", to_str(w1)));
+    let full = weight_session_tensor(id, "weight");
+    println(str_concat("full_n=", to_str(len(full))));
+    // bias window
+    let b = weight_session_window(id, "bias", 0, 1);
+    println(str_concat("b0=", to_str(b)));
+    close_weight_session(id);
+
+    // Q4_0 block-local decode (64 elems, only second half)
+    let qid = open_weight_session("demos/weights/W_q4_0.gguf");
+    let half = weight_session_window(qid, "weight", 32, 32);
+    println(str_concat("q4_half_n=", to_str(len(half))));
+    let fullq = weight_session_tensor(qid, "weight");
+    // first of second half must match full[32]
+    println(str_concat("q4_match=", to_str(half[0] == fullq[32])));
+    close_weight_session(qid);
+
+    // one-shot path
+    let oneshot = load_gguf_window("demos/weights/W.gguf", "weight", 1, 2);
+    println(str_concat("oneshot=", to_str(oneshot)));
+    let stw = load_safetensors_window("demos/weights/W.safetensors", "weight", 2, 2);
+    println(str_concat("st_win=", to_str(stw)));
+
+    println("weight_window_ok");
+}

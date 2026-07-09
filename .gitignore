@@ -1,0 +1,35 @@
+# binaries / build
+/trin
+/build/
+*.o
+*.a
+*.so
+*.exe
+
+# Go
+*.test
+*.out
+/vendor/
+coverage.out
+*.prof
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# local scratch
+/tmp/
+*.ll
+*.s
+*.mlir

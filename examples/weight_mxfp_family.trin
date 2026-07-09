@@ -1,0 +1,25 @@
+// v0.99 — MXFP4 + NVFP4 GGUF dequant via weight sessions
+fn main() {
+    let id_m = open_weight_session("demos/weights/W_mxfp4.gguf");
+    let wm = weight_session_tensor(id_m, "W");
+    println(str_concat("nm=", to_str(len(wm))));
+    println(str_concat("wm0=", to_str(wm[0])));
+    let ym = weight_session_linear(id_m, "W", wm, 1, 256, 8);
+    println(str_concat("ym=", to_str(ym)));
+    // each weight ~12, y0 = sum(w_i * w_i) ≈ 256*144 = 36864
+    let ok_m = (wm[0] > 11.5) * (wm[0] < 12.5) * (ym[0] > 36000.0) * (ym[0] < 38000.0);
+    close_weight_session(id_m);
+
+    let id_n = open_weight_session("demos/weights/W_nvfp4.gguf");
+    let wn = weight_session_tensor(id_n, "W");
+    println(str_concat("nn=", to_str(len(wn))));
+    println(str_concat("wn0=", to_str(wn[0])));
+    let yn = weight_session_linear(id_n, "W", wn, 1, 256, 8);
+    println(str_concat("yn=", to_str(yn)));
+    let ok_n = (wn[0] > 11.5) * (wn[0] < 12.5) * (yn[0] > 36000.0) * (yn[0] < 38000.0);
+    close_weight_session(id_n);
+
+    let ok = ok_m * ok_n;
+    println(str_concat("mxfp_family_ok=", to_str(ok)));
+    println("weight_mxfp_family_ok");
+}

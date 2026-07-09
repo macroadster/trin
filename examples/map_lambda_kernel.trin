@@ -1,0 +1,11 @@
+// Pure f32 map-lambda kernel for emit-llvm (v0.10)
+// loss = soft_mux(w, sum(map((x)=>x*a, [p,q])), sum(map((x)=>x+b, [r])))
+
+fn loss(w: f32, a: f32, p: f32, q: f32, b: f32, r: f32) {
+    soft_mux(w, sum(map((x) => x * a, [p, q])), sum(map((x) => x + b, [r])))
+}
+
+fn main() {
+    let y = soft_mux(0.5, 14.0, 6.0);
+    println(str_concat("map lambda kernel probe y = ", to_str(y)));
+}

@@ -1,0 +1,30 @@
+// True map-lambda reverse-mode AD (v0.10)
+// sum(map((x)=>x*a+b, [1,2,3])) = a*6 + 3*b
+// sum(map((x)=>x*x+s, [u,v])) = u^2+v^2+2s
+// soft_mux mix with mapped pure/each arms
+
+fn main() {
+    let names = ["a", "b"];
+    let vals = [2.0, 1.0];
+    let g = grad_expr("sum(map((x)=>x*a+b, [1,2,3]))", names, vals);
+    println(str_concat("v = ", to_str(g[0])));
+    println(str_concat("da = ", to_str(g[1])));
+    println(str_concat("db = ", to_str(g[2])));
+
+    let names2 = ["u", "v", "s"];
+    let vals2 = [3.0, 4.0, 1.0];
+    let h = grad_expr("sum(map((x)=>x*x+s, [u,v]))", names2, vals2);
+    println(str_concat("q = ", to_str(h[0])));
+    println(str_concat("du = ", to_str(h[1])));
+    println(str_concat("dv = ", to_str(h[2])));
+    println(str_concat("ds = ", to_str(h[3])));
+
+    let names3 = ["w", "a", "p", "q", "b", "r"];
+    let vals3 = [0.5, 2.0, 3.0, 4.0, 1.0, 5.0];
+    let m = grad_expr("soft_mux(w, sum(map((x)=>x*a, [p,q])), sum(map((x)=>x+b, [r])))", names3, vals3);
+    println(str_concat("y = ", to_str(m[0])));
+    println(str_concat("dy/dw = ", to_str(m[1])));
+    println(str_concat("dy/da = ", to_str(m[2])));
+    println(str_concat("dy/dp = ", to_str(m[3])));
+    println(str_concat("dy/db = ", to_str(m[5])));
+}

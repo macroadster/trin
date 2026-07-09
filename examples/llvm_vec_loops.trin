@@ -1,0 +1,15 @@
+// Vectorizable span-loop helpers (v0.20)
+// link-llvm defaults to trin_vec_loop_probe → 36.0 when sum/dot/span_add/scale loops match.
+
+fn main() {
+    // Interpret-side check: same numbers the LLVM probe uses.
+    let s = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let d = dot([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let sa = sum(span_add([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+    let sc = sum(scale(2.0, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+    println(str_concat("sum8 = ", to_str(s)));
+    println(str_concat("dot8 = ", to_str(d)));
+    println(str_concat("span_add_sum8 = ", to_str(sa)));
+    println(str_concat("scale_sum8 = ", to_str(sc)));
+    println("llvm_probe_target = 36");
+}

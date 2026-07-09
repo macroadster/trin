@@ -1,0 +1,167 @@
+// Tiny ternary LLM with first-class KV helpers (v0.82)
+// Same toy model as tiny_ternary_llm.trin, but K/V caches grow via kv_append.
+
+fn main() {
+    let E = [
+        0.1, 0.0, 0.0, 0.0,
+        1.0, 0.2, 0.0, 0.1,
+        0.0, 1.0, 0.1, 0.0,
+        0.2, 0.0, 1.0, 0.0,
+        0.0, 0.1, 0.0, 1.0,
+        0.5, 0.5, 0.0, 0.0,
+        0.0, 0.5, 0.5, 0.0,
+        0.0, 0.0, 0.0, 0.5
+    ];
+    let Wq_f = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ];
+    let Wk_f = [
+        1.0, 0.1, 0.0, 0.0,
+        0.0, 1.0, 0.1, 0.0,
+        0.0, 0.0, 1.0, 0.1,
+        0.1, 0.0, 0.0, 1.0
+    ];
+    let Wv_f = [
+        0.8, 0.0, 0.1, 0.0,
+        0.0, 0.8, 0.0, 0.1,
+        0.1, 0.0, 0.8, 0.0,
+        0.0, 0.1, 0.0, 0.8
+    ];
+    let Wo_f = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    ];
+    let Wu_f = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+        0.5, 0.5, 0.0, 0.0,
+        0.0, 0.5, 0.5, 0.0,
+        0.0, 0.0, 0.5, 0.5,
+        0.5, 0.0, 0.0, 0.5
+    ];
+    let Wd_f = [
+        1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.5,
+        0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0,
+        0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.5
+    ];
+    let Wh_f = [
+        0.2, 0.0, 0.0, 0.0,
+        1.2, 0.1, 0.0, 0.0,
+        0.1, 1.2, 0.0, 0.0,
+        0.0, 0.1, 1.2, 0.0,
+        0.0, 0.0, 0.1, 1.2,
+        0.6, 0.6, 0.0, 0.0,
+        0.0, 0.6, 0.6, 0.0,
+        -0.5, -0.5, -0.5, -0.5
+    ];
+
+    let q_wq = quantize_absmean(Wq_f); let Wq = q_wq[0]; let sq = q_wq[1];
+    let q_wk = quantize_absmean(Wk_f); let Wk = q_wk[0]; let sk = q_wk[1];
+    let q_wv = quantize_absmean(Wv_f); let Wv = q_wv[0]; let sv = q_wv[1];
+    let q_wo = quantize_absmean(Wo_f); let Wo = q_wo[0]; let so = q_wo[1];
+    let q_wu = quantize_absmean(Wu_f); let Wu = q_wu[0]; let su = q_wu[1];
+    let q_wd = quantize_absmean(Wd_f); let Wd = q_wd[0]; let sd = q_wd[1];
+    let q_wh = quantize_absmean(Wh_f); let Wh = q_wh[0]; let sh = q_wh[1];
+
+    let dim = 4;
+    let t0 = 1;
+    let t1 = 2;
+
+    // Start empty KV caches
+    let Kc = kv_new();
+    let Vc = kv_new();
+
+    // pos0 prompt
+    let x0 = embed_row(E, t0, dim);
+    let x0n = rmsnorm(x0, 0.000001, 1.0);
+    let q0 = linear_trit(Wq, x0n, 4, 4, sq);
+    let k0 = linear_trit(Wk, x0n, 4, 4, sk);
+    let v0 = linear_trit(Wv, x0n, 4, 4, sv);
+    let q0r = rope(q0, 0.0);
+    let k0r = rope(k0, 0.0);
+    let Kc = kv_append(Kc, k0r);
+    let Vc = kv_append(Vc, v0);
+    let a0 = attn(q0r, Kc, Vc, dim);
+    let a0o = linear_trit(Wo, a0, 4, 4, so);
+    let h0 = residual_add(x0, a0o);
+    let h0n = rmsnorm(h0, 0.000001, 1.0);
+    let u0 = silu(linear_trit(Wu, h0n, 8, 4, su));
+    let f0 = linear_trit(Wd, u0, 4, 8, sd);
+    let y0 = residual_add(h0, f0);
+
+    // pos1 prompt
+    let x1 = embed_row(E, t1, dim);
+    let x1n = rmsnorm(x1, 0.000001, 1.0);
+    let q1 = linear_trit(Wq, x1n, 4, 4, sq);
+    let k1 = linear_trit(Wk, x1n, 4, 4, sk);
+    let v1 = linear_trit(Wv, x1n, 4, 4, sv);
+    let q1r = rope(q1, 1.0);
+    let k1r = rope(k1, 1.0);
+    let Kc = kv_append(Kc, k1r);
+    let Vc = kv_append(Vc, v1);
+    let a1 = attn(q1r, Kc, Vc, dim);
+    let a1o = linear_trit(Wo, a1, 4, 4, so);
+    let h1 = residual_add(x1, a1o);
+    let h1n = rmsnorm(h1, 0.000001, 1.0);
+    let u1 = silu(linear_trit(Wu, h1n, 8, 4, su));
+    let f1 = linear_trit(Wd, u1, 4, 8, sd);
+    let y1 = residual_add(h1, f1);
+    let logits1 = linear_trit(Wh, y1, 8, 4, sh);
+    let g1 = sample_logits(logits1, 0.0);
+    println(str_concat("gen1=", to_str(g1)));
+    println(str_concat("kv_toks=", to_str(kv_len(Kc, dim))));
+
+    // gen pos2
+    let x2 = embed_row(E, g1, dim);
+    let x2n = rmsnorm(x2, 0.000001, 1.0);
+    let q2 = linear_trit(Wq, x2n, 4, 4, sq);
+    let k2 = linear_trit(Wk, x2n, 4, 4, sk);
+    let v2 = linear_trit(Wv, x2n, 4, 4, sv);
+    let q2r = rope(q2, 2.0);
+    let k2r = rope(k2, 2.0);
+    let Kc = kv_append(Kc, k2r);
+    let Vc = kv_append(Vc, v2);
+    let a2 = attn(q2r, Kc, Vc, dim);
+    let a2o = linear_trit(Wo, a2, 4, 4, so);
+    let h2 = residual_add(x2, a2o);
+    let h2n = rmsnorm(h2, 0.000001, 1.0);
+    let u2 = silu(linear_trit(Wu, h2n, 8, 4, su));
+    let f2 = linear_trit(Wd, u2, 4, 8, sd);
+    let y2 = residual_add(h2, f2);
+    let logits2 = linear_trit(Wh, y2, 8, 4, sh);
+    let g2 = sample_logits(logits2, 0.0);
+    println(str_concat("gen2=", to_str(g2)));
+
+    // gen pos3
+    let x3 = embed_row(E, g2, dim);
+    let x3n = rmsnorm(x3, 0.000001, 1.0);
+    let q3 = linear_trit(Wq, x3n, 4, 4, sq);
+    let k3 = linear_trit(Wk, x3n, 4, 4, sk);
+    let v3 = linear_trit(Wv, x3n, 4, 4, sv);
+    let q3r = rope(q3, 3.0);
+    let k3r = rope(k3, 3.0);
+    let Kc = kv_append(Kc, k3r);
+    let Vc = kv_append(Vc, v3);
+    let a3 = attn(q3r, Kc, Vc, dim);
+    let a3o = linear_trit(Wo, a3, 4, 4, so);
+    let h3 = residual_add(x3, a3o);
+    let h3n = rmsnorm(h3, 0.000001, 1.0);
+    let u3 = silu(linear_trit(Wu, h3n, 8, 4, su));
+    let f3 = linear_trit(Wd, u3, 4, 8, sd);
+    let y3 = residual_add(h3, f3);
+    let logits3 = linear_trit(Wh, y3, 8, 4, sh);
+    let g3 = sample_logits(logits3, 0.0);
+    println(str_concat("gen3=", to_str(g3)));
+    println(str_concat("final_kv_toks=", to_str(kv_len(Kc, dim))));
+
+    println(str_concat("prompt=AB gen=", str_concat(to_str(g1), str_concat(",", str_concat(to_str(g2), str_concat(",", to_str(g3)))))));
+    println("tiny_ternary_llm_kv_ok");
+}

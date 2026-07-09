@@ -1,0 +1,24 @@
+// Dynamic tile selection in full-program @main (v0.32)
+// Fixed-length sum/dot lower through @trin_dyn_sum* / @trin_dyn_dot*
+// which query @trin_hw_vlen_for_n at runtime.
+
+fn main() {
+    let s4 = sum([1.0, 2.0, 3.0, 4.0]);
+    let s8 = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let d4 = dot([1.0, 2.0, 3.0, 4.0], [1.0, 1.0, 1.0, 1.0]);
+    let t4 = dyn_tile(4);
+    let t8 = dyn_tile(8);
+    let t10 = dyn_tile(10);
+    let t20 = dyn_tile(20);
+    let hv = hw_vlen();
+    println(str_concat("sum4 = ", to_str(s4)));
+    println(str_concat("sum8 = ", to_str(s8)));
+    println(str_concat("dot4 = ", to_str(d4)));
+    println(str_concat("dyn_tile4 = ", to_str(t4)));
+    println(str_concat("dyn_tile8 = ", to_str(t8)));
+    println(str_concat("dyn_tile10 = ", to_str(t10)));
+    println(str_concat("dyn_tile20 = ", to_str(t20)));
+    println(str_concat("hw_vlen = ", to_str(hv)));
+    println("dyn_tile_probe_target = sum4:10 sum8:36 dot4:10");
+    println("mlir_dyn_tile_note = runtime_hw_vlen_for_n");
+}

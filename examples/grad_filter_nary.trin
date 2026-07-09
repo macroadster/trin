@@ -1,0 +1,40 @@
+// N-ary zip_with + filter reverse-mode AD (v0.15)
+
+fn main() {
+    // sum(zip_with((x,y,z,w)=>x*w+y+z, [a,b], [c,d], [e,f], [g,h]))
+    // = a*g+c+e + b*h+d+f
+    // a=1 b=2 c=10 d=20 e=0.5 f=1.5 g=2 h=3 → 1*2+10+0.5 + 2*3+20+1.5 = 12.5+27.5=40
+    // da=g=2 db=h=3 dc=dd=de=df=1 dg=a=1 dh=b=2
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let vals = [1.0, 2.0, 10.0, 20.0, 0.5, 1.5, 2.0, 3.0];
+    let g = grad_expr("sum(zip_with((x,y,z,w)=>x*w+y+z, [a,b], [c,d], [e,f], [g,h]))", names, vals);
+    println(str_concat("v = ", to_str(g[0])));
+    println(str_concat("da = ", to_str(g[1])));
+    println(str_concat("db = ", to_str(g[2])));
+    println(str_concat("dc = ", to_str(g[3])));
+    println(str_concat("dg = ", to_str(g[7])));
+    println(str_concat("dh = ", to_str(g[8])));
+
+    // sum(filter((x)=>x-k, [p,q,r])) with k=2, p=1 q=2 r=3 → keep p,r sum=4
+    // dp=1 dq=0 (dropped) dr=1; k does not receive grad (hard threshold pred)
+    let names2 = ["p", "q", "r", "k"];
+    let vals2 = [1.0, 2.0, 3.0, 2.0];
+    let h = grad_expr("sum(filter((x)=>x-k, [p,q,r]))", names2, vals2);
+    println(str_concat("q = ", to_str(h[0])));
+    println(str_concat("dp = ", to_str(h[1])));
+    println(str_concat("dq = ", to_str(h[2])));
+    println(str_concat("dr = ", to_str(h[3])));
+    println(str_concat("dk = ", to_str(h[4])));
+
+    // reduce over 4-ary zip: reduce((acc,x)=>acc+x, 0, zip_with((x,y,z,w)=>x+y+z*w, [p],[q],[r],[s]))
+    // = p+q+r*s; p=1 q=2 r=3 s=4 → 1+2+12=15
+    // dp=1 dq=1 dr=s=4 ds=r=3
+    let names3 = ["p", "q", "r", "s"];
+    let vals3 = [1.0, 2.0, 3.0, 4.0];
+    let m = grad_expr("reduce((acc,x)=>acc+x, 0, zip_with((x,y,z,w)=>x+y+z*w, [p], [q], [r], [s]))", names3, vals3);
+    println(str_concat("m = ", to_str(m[0])));
+    println(str_concat("dmp = ", to_str(m[1])));
+    println(str_concat("dmq = ", to_str(m[2])));
+    println(str_concat("dmr = ", to_str(m[3])));
+    println(str_concat("dms = ", to_str(m[4])));
+}

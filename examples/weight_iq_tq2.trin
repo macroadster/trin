@@ -1,0 +1,26 @@
+// v0.94 — IQ4_XS + TQ1_0 GGUF dequant via weight sessions
+fn main() {
+    let id = open_weight_session("demos/weights/W_iq4_xs.gguf");
+    let w = weight_session_tensor(id, "W");
+    println(str_concat("xs_n=", to_str(len(w))));
+    println(str_concat("xs_w0=", to_str(w[0])));
+    // x = dequant itself → y = sum of squares; with all ~1, y≈256
+    let y = weight_session_linear(id, "W", w, 1, 256, 8);
+    println(str_concat("xs_y=", to_str(y)));
+    let xs_ok = (y[0] > 200.0) * (y[0] < 300.0) * (w[0] > 0.5) * (w[0] < 1.5);
+    println(str_concat("xs_match=", to_str(xs_ok)));
+    close_weight_session(id);
+
+    let id2 = open_weight_session("demos/weights/W_tq1_0.gguf");
+    let wt = weight_session_tensor(id2, "W");
+    println(str_concat("tq1_n=", to_str(len(wt))));
+    println(str_concat("tq1_w0=", to_str(wt[0])));
+    let z = weight_session_linear(id2, "W", wt, 1, 256, 8);
+    println(str_concat("tq1_y=", to_str(z)));
+    let tq_ok = (z[0] > 255.0) * (z[0] < 257.0) * (wt[0] > 0.9) * (wt[0] < 1.1);
+    println(str_concat("tq1_match=", to_str(tq_ok)));
+    close_weight_session(id2);
+
+    println(str_concat("iq_tq2_ok=", to_str(xs_ok * tq_ok)));
+    println("weight_iq_tq2_ok");
+}

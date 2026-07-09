@@ -1,0 +1,19 @@
+// Multi-level soft_mux trees + multi-word plane GEMM folds (v0.38)
+// Interpreter demo — rewrite probe target is 64 via emit-mlir-llvm.
+
+fn main() {
+    // both-arms style: soft_mux(0.5, soft_mux(0.5,10,2), soft_mux(0.25,10,2)) = 5
+    let tree = soft_mux(0.5, soft_mux(0.5, 10.0, 2.0), soft_mux(0.25, 10.0, 2.0));
+    // triple pure nest: soft_mux(0.5, soft_mux(0.5, soft_mux(0.5,10,2), 2), 2) = 3
+    let triple = soft_mux(0.5, soft_mux(0.5, soft_mux(0.5, 10.0, 2.0), 2.0), 2.0);
+    // second triple: soft_mux(0.5^3, 36, 4) = 8
+    let tree2 = soft_mux(0.5, soft_mux(0.5, soft_mux(0.5, 36.0, 4.0), 4.0), 4.0);
+    let soft = tree + triple + tree2; // 16
+
+    println(str_concat("tree = ", to_str(tree)));
+    println(str_concat("triple = ", to_str(triple)));
+    println(str_concat("tree2 = ", to_str(tree2)));
+    println(str_concat("soft = ", to_str(soft)));
+    println("tree_probe_target = soft:16 plane:48 total:64");
+    println("mlir_tree_fold_note = multi_level_soft_mux_multi_word_gemm");
+}

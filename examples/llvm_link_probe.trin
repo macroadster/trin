@@ -1,0 +1,12 @@
+// Pure f32 kernel exercised by `trin link-llvm` / --backend llvm (v0.17)
+// loss(w,a,x,b) = soft_mux(w, a*x, b)
+// default host probe: loss(0.5, 3, 4, 2) = 7.0
+
+fn loss(w: f32, a: f32, x: f32, b: f32) {
+    soft_mux(w, a * x, b)
+}
+
+fn main() {
+    let y = soft_mux(0.5, 12.0, 2.0);
+    println(str_concat("kernel probe y = ", to_str(y)));
+}

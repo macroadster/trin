@@ -1,0 +1,22 @@
+// Bitplane trit path must match scalar trit_gemm
+fn main() {
+    let A = [
+        trit(1), trit(0), trit(-1),
+        trit(0), trit(1), trit(1)
+    ];
+    let B = [
+        trit(1), trit(-1),
+        trit(1), trit(0),
+        trit(0), trit(1)
+    ];
+
+    let Cs = trit_gemm(A, B, 2, 3, 2);
+    let Cb = trit_gemm_bitplane(A, B, 2, 3, 2);
+    println(str_concat("scalar   C = ", to_str(Cs)));
+    println(str_concat("bitplane C = ", to_str(Cb)));
+
+    // pack / unpack round-trip
+    let planes = trit_pack(A);
+    let back = trit_unpack(planes);
+    println(str_concat("roundtrip A = ", to_str(back)));
+}

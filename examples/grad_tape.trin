@@ -1,0 +1,41 @@
+// Full reverse-mode AD over multi-op soft_mux graphs (v0.7)
+// grad_expr(expr, names, values) → [value, ∂/∂name0, ∂/∂name1, ...]
+//
+// loss = soft_mux(w, a*x + b, c) * a
+// w=0.4, a=2, x=3, b=1, c=5
+// pure = 2*3+1 = 7
+// mux  = 0.4*7 + 0.6*5 = 5.8
+// loss = 5.8 * 2 = 11.6
+// d/dw = a*(pure-c) = 2*(7-5) = 4
+// d/da = mux + a * (w*x) = 5.8 + 2*1.2 = 8.2
+// d/dx = a * (w*a) = 2 * (0.4*2) = 1.6
+// d/db = a * w = 0.8
+// d/dc = a * (1-w) = 1.2
+
+fn main() {
+    let names = ["w", "a", "x", "b", "c"];
+    let vals = [0.4, 2.0, 3.0, 1.0, 5.0];
+    let g = grad_expr("soft_mux(w, a*x + b, c) * a", names, vals);
+    println(str_concat("loss = ", to_str(g[0])));
+    println(str_concat("d/dw = ", to_str(g[1])));
+    println(str_concat("d/da = ", to_str(g[2])));
+    println(str_concat("d/dx = ", to_str(g[3])));
+    println(str_concat("d/db = ", to_str(g[4])));
+    println(str_concat("d/dc = ", to_str(g[5])));
+
+    // nested soft mux composition
+    // y = soft_mux(u, soft_mux(w, a, b), c)
+    // u=0.5, w=0.25, a=10, b=2, c=0
+    // inner = 0.25*10+0.75*2 = 4
+    // y = 0.5*4 + 0.5*0 = 2
+    // d/du = inner - c = 4
+    // d/dw = u*(a-b) = 0.5*8 = 4
+    // d/da = u*w = 0.125
+    let names2 = ["u", "w", "a", "b", "c"];
+    let vals2 = [0.5, 0.25, 10.0, 2.0, 0.0];
+    let h = grad_expr("soft_mux(u, soft_mux(w, a, b), c)", names2, vals2);
+    println(str_concat("y = ", to_str(h[0])));
+    println(str_concat("dy/du = ", to_str(h[1])));
+    println(str_concat("dy/dw = ", to_str(h[2])));
+    println(str_concat("dy/da = ", to_str(h[3])));
+}

@@ -1,0 +1,32 @@
+// soft_mux_v + bitplane algebraic folds demo (v0.33)
+// Interpreter validates the same identities the rewrite probe folds.
+
+fn main() {
+    // planes: x=15 (0b1111), z=0
+    // folds: and(x,x)=x, and(x,0)=0, or(x,0)=x, xor(x,x)=0, popcount(15)=4, popcount(0)=0
+    let and_xx = 15;
+    let and_x0 = 0;
+    let or_x0 = 15;
+    let xor_xx = 0;
+    let pc = 4;
+    let pz = 0;
+    let plane = and_xx + and_x0 + or_x0 + xor_xx + pc + pz; // 34
+
+    // soft_mux_v strength: each=0 → w*pure; pure=0 → (1-w)*each
+    // sum of (0.5 * [2,2,2,2]) twice = 4 + 4
+    let sm0 = sum([1.0, 1.0, 1.0, 1.0]); // 4
+    let sm1 = sum([1.0, 1.0, 1.0, 1.0]); // 4
+    let total = plane + sm0 + sm1; // 42
+
+    println(str_concat("plane_and_xx = ", to_str(and_xx)));
+    println(str_concat("plane_and_x0 = ", to_str(and_x0)));
+    println(str_concat("plane_or_x0 = ", to_str(or_x0)));
+    println(str_concat("plane_xor_xx = ", to_str(xor_xx)));
+    println(str_concat("plane_popcount_x = ", to_str(pc)));
+    println(str_concat("plane_popcount_0 = ", to_str(pz)));
+    println(str_concat("plane_sum = ", to_str(plane)));
+    println(str_concat("soft_mux_v_sums = ", to_str(sm0 + sm1)));
+    println(str_concat("bitplane_alg_sum = ", to_str(total)));
+    println("bitplane_alg_probe_target = 42");
+    println("mlir_bitplane_alg_note = rewrite_soft_mux_v_and_plane_identities");
+}

@@ -1,0 +1,26 @@
+// Auto residual peel for pointer/counted kernels (v0.36)
+// Interpreter check for n=10 sum path that pointer kernels peel at runtime.
+
+fn main() {
+    // n=10 peels as 8+2 residual → 55
+    let s10 = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    // n=5 peels as 4+1 residual → 15
+    let s5 = sum([1.0, 2.0, 3.0, 4.0, 5.0]);
+    // n=20 peels as 16+4 residual → 210
+    let s20 = sum([
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        17.0, 18.0, 19.0, 20.0
+    ]);
+    let d10 = dot(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    );
+
+    println(str_concat("sum5 = ", to_str(s5)));
+    println(str_concat("sum10 = ", to_str(s10)));
+    println(str_concat("sum20 = ", to_str(s20)));
+    println(str_concat("dot10 = ", to_str(d10)));
+    println("auto_peel_probe_target = sum5:15 sum10:55 sum20:210 dot10:55");
+    println("mlir_auto_peel_note = pointer_counted_16_8_4_residual");
+}

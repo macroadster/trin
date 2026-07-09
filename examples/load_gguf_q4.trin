@@ -1,0 +1,28 @@
+// v0.84 — load GGUF Q4_0 / Q8_0 block-quant tensors → linear_trit path
+fn main() {
+    let names = load_gguf_list("demos/weights/W_q4_0.gguf");
+    println(str_concat("names=", to_str(names)));
+    let meta = load_gguf_meta("demos/weights/W_q4_0.gguf", "general.name");
+    println(str_concat("meta=", meta));
+    let shape = load_gguf_shape("demos/weights/W_q4_0.gguf", "weight");
+    println(str_concat("shape=", to_str(shape)));
+    let w = load_gguf_tensor("demos/weights/W_q4_0.gguf", "weight");
+    println(str_concat("n=", to_str(len(w))));
+    // treat as 2x32 weight
+    let q = quantize_absmean(w);
+    // 32-d input of ones-ish
+    let x = [
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25,
+        1.0, 0.5, -0.5, 1.0, 0.0, -1.0, 0.25, -0.25
+    ];
+    let y = linear_trit(q[0], x, 2, 32, q[1]);
+    println(str_concat("y_q4=", to_str(y)));
+
+    let w8 = load_gguf_tensor("demos/weights/W_q8_0.gguf", "weight");
+    let q8 = quantize_absmean(w8);
+    let y8 = linear_trit(q8[0], x, 2, 32, q8[1]);
+    println(str_concat("y_q8=", to_str(y8)));
+    println("load_gguf_q4_ok");
+}

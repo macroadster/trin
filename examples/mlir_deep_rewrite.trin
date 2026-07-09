@@ -1,0 +1,22 @@
+// Deeper rewrite demo (v0.27)
+// CSE pure arith, multi-use soft_mux commoning, vector-width pick (v16).
+// Probes: cse → 6, soft_cse → 12, vwidth → 136.
+
+fn main() {
+    let a = 1.0 + 2.0;
+    let b = 1.0 + 2.0;
+    let cse = a + b;
+    let m1 = soft_mux(0.5, 10.0, 2.0);
+    let m2 = soft_mux(0.5, 10.0, 2.0);
+    let soft_cse = m1 + m2;
+    let s = sum([
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+    ]);
+    println(str_concat("cse = ", to_str(cse)));
+    println(str_concat("soft_cse = ", to_str(soft_cse)));
+    println(str_concat("vwidth_sum16 = ", to_str(s)));
+    println("cse_probe_target = 6");
+    println("soft_cse_probe_target = 12");
+    println("vwidth_probe_target = 136");
+}

@@ -1,0 +1,27 @@
+// Ternary zip_with + scan pure eval + Go/C codegen (v0.14)
+
+fn main() {
+    let a = [1.0, 2.0, 3.0];
+    let b = [10.0, 20.0, 30.0];
+    let c = [0.5, 1.0, 1.5];
+    // ternary: x*s + y + z with free s=2 → [1*2+10+0.5, 2*2+20+1, 3*2+30+1.5] = [12.5, 25, 37.5]
+    let s = 2.0;
+    let ys = zip_with((x, y, z) => x * s + y + z, a, b, c);
+    println(str_concat("ys = ", to_str(ys)));
+    println(str_concat("sum = ", to_str(sum(ys))));
+
+    // scan prefixes: scan((acc,x)=>acc+x, 0, [1,2,3,4]) = [1,3,6,10]
+    let xs = [1.0, 2.0, 3.0, 4.0];
+    let pref = scan((acc, x) => acc + x, 0.0, xs);
+    println(str_concat("pref = ", to_str(pref)));
+
+    // free-var scan: scan((acc,x)=>acc+x*k, 0, [1,2,3]) with k=2 → [2,6,12]
+    let k = 2.0;
+    let sk = scan((acc, x) => acc + x * k, 0.0, [1.0, 2.0, 3.0]);
+    println(str_concat("sk = ", to_str(sk)));
+
+    // compose: sum(scan(...)) over map span
+    // map → [2,3]; scan prefixes [2,5]; sum = 7
+    let nested = sum(scan((acc, x) => acc + x, 0.0, map((z) => z + 1.0, [1.0, 2.0])));
+    println(str_concat("nested = ", to_str(nested)));
+}

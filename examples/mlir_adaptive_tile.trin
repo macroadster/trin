@@ -1,0 +1,18 @@
+// Adaptive tile from runtime ISA (v0.39)
+// Interpreter surface: print host-independent expectations for the rewrite probe.
+// Runtime LLVM helpers @trin_adaptive_tile* gate peels by live ISA (sse/avx/avx512/…).
+
+fn main() {
+    // Adaptive tile table (codes): portable→16, sse→4, avx→8, avx512→16, sve→16, neon→4
+    println("adaptive_tile_note = runtime_isa");
+    println("adaptive_tile_table = portable:16 sse:4 avx:8 avx512:16 sve:32 neon:4");
+    println("adaptive_tile_probe_target = 100");
+    // Demo fixed adaptive picks independent of host (pure arithmetic).
+    let a10 = 8;   // AdaptiveTileForN(16,10) portable default demo
+    let a3 = 3;
+    let a20 = 16;
+    println(str_concat("demo_tile10 = ", to_str(a10)));
+    println(str_concat("demo_tile3 = ", to_str(a3)));
+    println(str_concat("demo_tile20 = ", to_str(a20)));
+    println("probe_ok_when = residuals_cancel_to_100");
+}

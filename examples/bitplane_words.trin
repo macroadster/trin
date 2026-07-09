@@ -1,0 +1,54 @@
+// Dense 32-trit word packing + plane product vs scalar (v0.16)
+
+fn main() {
+    // 36-lane vectors (crosses a 32-bit word boundary)
+    let A = [
+        trit(1), trit(0), trit(-1), trit(1), trit(-1), trit(0), trit(1), trit(1),
+        trit(-1), trit(0), trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(1),
+        trit(-1), trit(1), trit(0), trit(-1)
+    ];
+    let B = [
+        trit(-1), trit(1), trit(0), trit(1), trit(1), trit(-1), trit(0), trit(-1),
+        trit(1), trit(0), trit(-1), trit(1), trit(0), trit(1), trit(-1), trit(0),
+        trit(1), trit(-1), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(1),
+        trit(0), trit(1), trit(-1), trit(0), trit(1), trit(1), trit(-1), trit(1),
+        trit(0), trit(-1), trit(1), trit(0)
+    ];
+
+    let packed = trit_pack_words(A);
+    let posW = packed[0];
+    let negW = packed[1];
+    let n = packed[2];
+    let back = trit_unpack_words(posW, negW, n);
+    println(str_concat("n = ", to_str(n)));
+    println(str_concat("nwords = ", to_str(len(posW))));
+
+    let backsum = sum(map((x) => x * 1.0, back));
+    let asum = sum(map((x) => x * 1.0, A));
+    println(str_concat("round sum A = ", to_str(asum)));
+    println(str_concat("round sum back = ", to_str(backsum)));
+
+    let Ap = trit_pack_words(A);
+    let Bp = trit_pack_words(B);
+    let d = trit_dot_planes(Ap[0], Ap[1], Bp[0], Bp[1], 36);
+    println(str_concat("dot planes = ", to_str(d)));
+
+    let raw = zip_with((x, y) => x * y, A, B);
+    let d_scalar = sum(raw);
+    println(str_concat("dot scalar = ", to_str(d_scalar)));
+
+    let Cs1 = trit_gemm(A, B, 1, 36, 1);
+    let Cb1 = trit_gemm_bitplane(A, B, 1, 36, 1);
+    println(str_concat("gemm scalar  = ", to_str(Cs1)));
+    println(str_concat("gemm bitplane= ", to_str(Cb1)));
+
+    let pos_and = trit_plane_and(Ap[0], Ap[0]);
+    let pc = trit_plane_popcount(pos_and);
+    println(str_concat("pos pop = ", to_str(pc)));
+
+    let zx = trit_plane_xor(Ap[0], Ap[0]);
+    let zpc = trit_plane_popcount(zx);
+    println(str_concat("xor self pop = ", to_str(zpc)));
+}

@@ -1,0 +1,13 @@
+// Binary zip_with pure eval + Go/C codegen (v0.12)
+
+fn main() {
+    let a = [1.0, 2.0, 3.0];
+    let b = [10.0, 20.0, 30.0];
+    let s = 0.5;
+    let ys = zip_with((x, y) => x * s + y, a, b);
+    println(str_concat("ys = ", to_str(ys)));
+    println(str_concat("sum = ", to_str(sum(ys))));
+
+    let mixed = zip_with((x, y) => soft_mux(0.5, x + y, x * y), a, b);
+    println(str_concat("mixed = ", to_str(mixed)));
+}

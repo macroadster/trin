@@ -1,0 +1,11 @@
+// Pure f32 span-style kernel for emit-llvm (v0.8)
+// kernel = soft_mux(w, a0+a1+a2+a3, a0*b0+a1*b1+a2*b2+a3*b3)
+
+fn loss(w: f32, a0: f32, a1: f32, a2: f32, a3: f32, b0: f32, b1: f32, b2: f32, b3: f32) {
+    soft_mux(w, ((a0 + a1) + a2) + a3, ((a0 * b0) + (a1 * b1)) + ((a2 * b2) + (a3 * b3)))
+}
+
+fn main() {
+    let y = soft_mux(0.25, 10.0, 2.0);
+    println(str_concat("span kernel probe y = ", to_str(y)));
+}

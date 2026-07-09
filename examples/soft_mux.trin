@@ -1,0 +1,13 @@
+// Soft unit gate demo: probability blend between two strings/numbers
+fn main() {
+    let g: unit = unit_of(0.8);
+    // soft: mostly pure path
+    let n = g | 10 | 0;
+    println(str_concat("soft number ~ ", str_concat("", n))); // relies on concat cast
+
+    let label =
+        harden(g)
+            | "high confidence"
+            | "low confidence";
+    println(label);
+}

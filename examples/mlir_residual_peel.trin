@@ -1,0 +1,32 @@
+// Residual peel for non-fixed-length spans in full-program kernels (v0.34)
+// n∉{4,8,16} peels into max 16/8/4 dyn tiles + scalar residual.
+
+fn main() {
+    // sum5: tile4 + residual1 → 15
+    let s5 = sum([1.0, 2.0, 3.0, 4.0, 5.0]);
+    // sum6: tile4 + residual2 → 21
+    let s6 = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    // sum10: tile8 + residual2 → 55
+    let s10 = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    // sum20: tile16 + tile4 → 210
+    let s20 = sum([
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        17.0, 18.0, 19.0, 20.0
+    ]);
+    // dot5: mul then peel → 15
+    let d5 = dot([1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 1.0, 1.0, 1.0, 1.0]);
+    // keep exact tiles still working
+    let s4 = sum([1.0, 2.0, 3.0, 4.0]);
+    let s8 = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+
+    println(str_concat("sum5 = ", to_str(s5)));
+    println(str_concat("sum6 = ", to_str(s6)));
+    println(str_concat("sum10 = ", to_str(s10)));
+    println(str_concat("sum20 = ", to_str(s20)));
+    println(str_concat("dot5 = ", to_str(d5)));
+    println(str_concat("sum4 = ", to_str(s4)));
+    println(str_concat("sum8 = ", to_str(s8)));
+    println("residual_peel_probe_target = sum5:15 sum6:21 sum10:55 sum20:210 dot5:15");
+    println("mlir_residual_peel_note = tile_plus_scalar_residual");
+}

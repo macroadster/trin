@@ -1,0 +1,8 @@
+// Scan-mul / reduce-mul peels + AdaptivePeelChunks + wide 32 ladder (v0.49)
+
+fn main() {
+    println("scan_mul_note = prefix_product_scan_reduce_mul");
+    println("scan_mul_probe_target = 64");
+    println("wide_peel_ladder = sve64");
+    println("adaptive_peel_chunks = emit_time_host");
+}

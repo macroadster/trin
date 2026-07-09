@@ -1,0 +1,32 @@
+// Span/vector algebraic folds demo (v0.31)
+// span_add(a,0) / span_add(0,a) → a (sum 10)
+// span_scale(1,a) → a (sum 10); span_scale(0,a) → 0
+// sum(0) → 0; dot(a,0) → 0
+// probe target sum of rewritten residuals = 30
+
+fn main() {
+    let a0 = 1.0;
+    let a1 = 2.0;
+    let a2 = 3.0;
+    let a3 = 4.0;
+    let s = sum([a0, a1, a2, a3]);
+    let z = 0.0;
+    let one = 1.0;
+    // Interpret-side demo of the same numeric story the MLIR rewrite probe targets.
+    let add0 = s + z;     // ~ span_add(a,0) sum
+    let add1 = z + s;     // ~ span_add(0,a) sum
+    let sc1 = one * s;    // ~ span_scale(1,a) sum
+    let sc0 = z * s;      // ~ span_scale(0,a) sum
+    let sumz = z;         // ~ sum(0)
+    let dotz = s * z;     // ~ dot(a,0) after zero factor (illustrative)
+    let total = add0 + add1 + sc1 + sc0 + sumz + dotz;
+    println(str_concat("add0 = ", to_str(add0)));
+    println(str_concat("add1 = ", to_str(add1)));
+    println(str_concat("sc1 = ", to_str(sc1)));
+    println(str_concat("sc0 = ", to_str(sc0)));
+    println(str_concat("sumz = ", to_str(sumz)));
+    println(str_concat("dotz = ", to_str(dotz)));
+    println(str_concat("span_alg_sum = ", to_str(total)));
+    println("span_alg_probe_target = 30");
+    println("mlir_span_alg_note = rewrite_span_vector_identities");
+}

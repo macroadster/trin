@@ -1,0 +1,32 @@
+// v0.93 — IQ4_NL + TQ2_0 GGUF dequant via weight sessions
+fn main() {
+    // IQ4_NL row of 32 ones → fused matvec with x=1 yields 32
+    let id = open_weight_session("demos/weights/W_iq4_nl.gguf");
+    let names = weight_session_list(id);
+    println(str_concat("iq_names=", to_str(len(names))));
+    let w = weight_session_tensor(id, "W");
+    println(str_concat("iq_n=", to_str(len(w))));
+    println(str_concat("iq_w0=", to_str(w[0])));
+    let win = weight_session_window(id, "W", 0, 8);
+    println(str_concat("iq_win=", to_str(len(win))));
+    let x = [1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0];
+    let y = weight_session_linear(id, "W", x, 1, 32, 1);
+    println(str_concat("iq_y=", to_str(y)));
+    let iq_ok = (y[0] > 31.5) * (y[0] < 32.5) * (w[0] > 0.9) * (w[0] < 1.1);
+    println(str_concat("iq_match=", to_str(iq_ok)));
+    close_weight_session(id);
+
+    // TQ2_0 row of 256 ones — use dequant tensor itself as x
+    let id2 = open_weight_session("demos/weights/W_tq2_0.gguf");
+    let wt = weight_session_tensor(id2, "W");
+    println(str_concat("tq_n=", to_str(len(wt))));
+    println(str_concat("tq_w0=", to_str(wt[0])));
+    let z = weight_session_linear(id2, "W", wt, 1, 256, 8);
+    println(str_concat("tq_y=", to_str(z)));
+    let tq_ok = (z[0] > 255.0) * (z[0] < 257.0) * (wt[0] > 0.9) * (wt[0] < 1.1);
+    println(str_concat("tq_match=", to_str(tq_ok)));
+    close_weight_session(id2);
+
+    println(str_concat("iq_tq_ok=", to_str(iq_ok * tq_ok)));
+    println("weight_iq_tq_ok");
+}

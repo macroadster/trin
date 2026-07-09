@@ -1,0 +1,12 @@
+// Hardware-aware VLEN demo (v0.28 surface / v0.30 runtime dispatch)
+// Portable preferred tile remains 16; @trin_hw_vlen is runtime CPUID in LLVM binaries.
+// On this class of x86 with AVX (no AVX-512): hw_vlen = 8.
+// Probes: portable vlen → 16, hw vlen → running-CPU-dependent (typically 8).
+
+fn main() {
+    let s = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    println(str_concat("sum8 = ", to_str(s)));
+    println("mlir_vlen_probe_target = 16");
+    println("mlir_hw_vlen_note = runtime_cpuid_dispatch");
+    println("mlir_hw_isa_codes = portable:0 sse:1 avx:2 avx512:3 sve:4 neon:5");
+}

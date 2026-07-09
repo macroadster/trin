@@ -1,0 +1,40 @@
+// Production ternary LLM kernel surface (v0.81+)
+fn main() {
+    // absmean quantize
+    let w = [0.9, -1.1, 0.05, 1.0, -0.8, 0.2];
+    let q = quantize_absmean(w);
+    let tw = q[0];
+    let scale = q[1];
+    println(str_concat("trits = ", to_str(tw)));
+    println(str_concat("scale = ", to_str(scale)));
+
+    // linear: M=2 K=3
+    let x = [1.0, 0.5, -0.5];
+    let y = linear_trit(tw, x, 2, 3, scale);
+    println(str_concat("linear_y = ", to_str(y)));
+
+    // scaled bitplane gemm
+    let A = [trit(1), trit(0), trit(-1), trit(0), trit(1), trit(1)];
+    let B = [trit(1), trit(-1), trit(1), trit(0), trit(0), trit(1)];
+    let Cg = linear_trit_gemm(A, B, 2, 3, 2, 0.5);
+    println(str_concat("gemm_scaled = ", to_str(Cg)));
+
+    // transformer helpers
+    let h = rmsnorm([1.0, 2.0, 3.0, 4.0], 0.000001, 1.0);
+    println(str_concat("rmsnorm = ", to_str(h)));
+    let p = softmax([1.0, 2.0, 3.0]);
+    println(str_concat("softmax = ", to_str(p)));
+    let u = silu(h);
+    println(str_concat("silu = ", to_str(u)));
+
+    // attention d=2, 2 tokens
+    let qv = [1.0, 0.0];
+    let K = [1.0, 0.0, 0.0, 1.0];
+    let V = [1.0, 2.0, 3.0, 4.0];
+    let o = attn(qv, K, V, 2);
+    println(str_concat("attn = ", to_str(o)));
+    let r = rope([1.0, 0.0, 0.0, 1.0], 0.0);
+    println(str_concat("rope0 = ", to_str(r)));
+    let tok = sample_logits([0.1, 2.5, 0.2], 0.0);
+    println(str_concat("tok = ", to_str(tok)));
+}

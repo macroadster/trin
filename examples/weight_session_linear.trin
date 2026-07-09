@@ -1,0 +1,42 @@
+// v0.88 — session-backed tiled linear (matvec) without full-tensor warm-up
+fn main() {
+    // F32 toy.gguf: W [2,3] = row0 + row1 windows
+    let id = open_weight_session("demos/weights/toy.gguf");
+    let x = [1.0, 0.0, -1.0];
+    // tiled full matvec with 1-row tiles
+    let y = weight_session_linear(id, "weight", x, 2, 3, 1);
+    println(str_concat("y=", to_str(y)));
+    // per-row tiles from same session
+    let t0 = weight_session_linear_tile(id, "weight", x, 3, 0, 1);
+    let t1 = weight_session_linear_tile(id, "weight", x, 3, 1, 1);
+    println(str_concat("t0=", to_str(t0)));
+    println(str_concat("t1=", to_str(t1)));
+    // t0/t1 must match y halves
+    println(str_concat("tile_match=", to_str((t0[0] == y[0]) * (t1[0] == y[1]))));
+    close_weight_session(id);
+
+    // Q4_0: W [2,32], only second-row tile decoded
+    let qid = open_weight_session("demos/weights/W_q4_0.gguf");
+    let xq = [
+        1.0, 0.0, -1.0, 0.5, 0.25, -0.5, 1.0, 0.0,
+        -1.0, 0.5, 0.25, -0.5, 1.0, 0.0, -1.0, 0.5,
+        0.25, -0.5, 1.0, 0.0, -1.0, 0.5, 0.25, -0.5,
+        1.0, 0.0, -1.0, 0.5, 0.25, -0.5, 1.0, 0.0
+    ];
+    let yq = weight_session_linear(qid, "weight", xq, 2, 32, 1);
+    let r1 = weight_session_linear_tile(qid, "weight", xq, 32, 1, 1);
+    println(str_concat("yq=", to_str(yq)));
+    println(str_concat("r1=", to_str(r1)));
+    println(str_concat("q4_tile_match=", to_str(r1[0] == yq[1])));
+    // two-row tile in one decode window
+    let full0 = weight_session_linear_tile(qid, "weight", xq, 32, 0, 2);
+    println(str_concat("two_row=", to_str(full0)));
+    println(str_concat("two_match=", to_str((full0[0] == yq[0]) * (full0[1] == yq[1]))));
+    close_weight_session(qid);
+
+    // one-shot GGUF linear
+    let y1 = load_gguf_linear("demos/weights/W.gguf", "weight", x, 2, 3, 2);
+    println(str_concat("oneshot=", to_str(y1)));
+
+    println("weight_session_linear_ok");
+}

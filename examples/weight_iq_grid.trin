@@ -1,0 +1,25 @@
+// v0.95 — IQ2_XXS + IQ3_XXS GGUF grid dequant via weight sessions
+fn main() {
+    let id = open_weight_session("demos/weights/W_iq2_xxs.gguf");
+    let w = weight_session_tensor(id, "W");
+    println(str_concat("iq2_n=", to_str(len(w))));
+    println(str_concat("iq2_w0=", to_str(w[0])));
+    let y = weight_session_linear(id, "W", w, 1, 256, 8);
+    println(str_concat("iq2_y=", to_str(y)));
+    let iq2_ok = (y[0] > 200.0) * (y[0] < 300.0) * (w[0] > 0.5) * (w[0] < 1.5);
+    println(str_concat("iq2_match=", to_str(iq2_ok)));
+    close_weight_session(id);
+
+    let id3 = open_weight_session("demos/weights/W_iq3_xxs.gguf");
+    let w3 = weight_session_tensor(id3, "W");
+    println(str_concat("iq3_n=", to_str(len(w3))));
+    println(str_concat("iq3_w0=", to_str(w3[0])));
+    let z = weight_session_linear(id3, "W", w3, 1, 256, 8);
+    println(str_concat("iq3_y=", to_str(z)));
+    let iq3_ok = (z[0] > 200.0) * (z[0] < 300.0) * (w3[0] > 0.5) * (w3[0] < 1.5);
+    println(str_concat("iq3_match=", to_str(iq3_ok)));
+    close_weight_session(id3);
+
+    println(str_concat("iq_grid_ok=", to_str(iq2_ok * iq3_ok)));
+    println("weight_iq_grid_ok");
+}

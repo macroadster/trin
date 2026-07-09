@@ -1,0 +1,9 @@
+// Scan/reduce peels + adaptive ISA peel ladder + deep forest (v0.41)
+// probes documented on emit-mlir / lower path.
+
+fn main() {
+    println("scan_reduce_note = prefix_scan_add_reduce_adaptive_ladder");
+    println("scan_reduce_probe_target = 275");
+    println("deep_forest_probe_target = 90");
+    println("adaptive_peel = isa_ladder");
+}

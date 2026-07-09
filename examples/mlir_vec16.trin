@@ -1,0 +1,28 @@
+// Wider 16-lane vector tiles demo (v0.26)
+// emit-mlir / emit-mlir-llvm ship vector<16xf32> helpers + trin_mlir_vec16_probe → 136.
+// Portable VLEN: preferred tile width 16; clamp via trin_vlen_for_n.
+
+fn main() {
+    let s = sum([
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+    ]);
+    let d = dot(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    );
+    let sa = sum(span_add(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    ));
+    let sc = sum(scale(2.0, [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+    ]));
+    println(str_concat("sum16 = ", to_str(s)));
+    println(str_concat("dot16 = ", to_str(d)));
+    println(str_concat("span_add_sum16 = ", to_str(sa)));
+    println(str_concat("scale_sum16 = ", to_str(sc)));
+    println("mlir_vec16_probe_target = 136");
+    println("mlir_vlen_probe_target = 16");
+}

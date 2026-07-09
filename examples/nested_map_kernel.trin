@@ -1,0 +1,11 @@
+// Nested map pure f32 kernel for emit-llvm (v0.11)
+// loss = sum(map((x)=>x*s, map((y)=>y+a, [u,v])))
+
+fn loss(s: f32, a: f32, u: f32, v: f32) {
+    sum(map((x) => x * s, map((y) => y + a, [u, v])))
+}
+
+fn main() {
+    let y = sum(map((x) => x * 4.0, map((y) => y + 3.0, [1.0, 2.0])));
+    println(str_concat("nested kernel probe y = ", to_str(y)));
+}

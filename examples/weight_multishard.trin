@@ -1,0 +1,24 @@
+// v1.00 — multi-shard GGUF via open_weight_session (auto-discovers siblings)
+fn main() {
+    let id = open_weight_session("demos/weights/toy_shard-00000-of-00002.gguf");
+    let names = weight_session_list(id);
+    println(str_concat("n_tensors=", to_str(len(names))));
+    // expect x then W
+    let x = weight_session_tensor(id, "x");
+    let w = weight_session_tensor(id, "W");
+    println(str_concat("nx=", to_str(len(x))));
+    println(str_concat("nw=", to_str(len(w))));
+    println(str_concat("x0=", to_str(x[0])));
+    println(str_concat("w0=", to_str(w[0])));
+    // y = W @ x; each of 4 rows is sum of ones = 4
+    let y = weight_session_linear(id, "W", x, 4, 4, 4);
+    println(str_concat("y=", to_str(y)));
+    let ok = (len(names) == 2) * (len(x) == 4) * (len(w) == 16)
+        * (x[0] > 0.9) * (x[0] < 1.1)
+        * (w[0] > 0.9) * (w[0] < 1.1)
+        * (y[0] > 3.9) * (y[0] < 4.1)
+        * (y[3] > 3.9) * (y[3] < 4.1);
+    close_weight_session(id);
+    println(str_concat("multishard_ok=", to_str(ok)));
+    println("weight_multishard_ok");
+}

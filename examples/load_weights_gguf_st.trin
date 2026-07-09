@@ -1,0 +1,36 @@
+// v0.83 — load GGUF + safetensors → quantize_absmean → linear_trit
+fn main() {
+    // ---- safetensors ----
+    let names_st = load_safetensors_list("demos/weights/toy.safetensors");
+    println(str_concat("st_names=", to_str(names_st)));
+    let shape_st = load_safetensors_shape("demos/weights/toy.safetensors", "weight");
+    println(str_concat("st_shape=", to_str(shape_st)));
+    let w_st = load_safetensors_tensor("demos/weights/toy.safetensors", "weight");
+    println(str_concat("st_n=", to_str(len(w_st))));
+    let q_st = quantize_absmean(w_st);
+    let tw_st = q_st[0];
+    let sc_st = q_st[1];
+    let x = [1.0, 0.5, -1.0];
+    let y_st = linear_trit(tw_st, x, 2, 3, sc_st);
+    println(str_concat("y_st=", to_str(y_st)));
+
+    // ---- GGUF ----
+    let names_g = load_gguf_list("demos/weights/toy.gguf");
+    println(str_concat("gg_names=", to_str(names_g)));
+    let meta = load_gguf_meta("demos/weights/toy.gguf", "general.name");
+    println(str_concat("gg_meta=", meta));
+    let shape_g = load_gguf_shape("demos/weights/toy.gguf", "weight");
+    println(str_concat("gg_shape=", to_str(shape_g)));
+    let w_g = load_gguf_tensor("demos/weights/toy.gguf", "weight");
+    let q_g = quantize_absmean(w_g);
+    let y_g = linear_trit(q_g[0], x, 2, 3, q_g[1]);
+    println(str_concat("y_gg=", to_str(y_g)));
+
+    // ---- auto path ----
+    let w_a = load_weight_tensor("demos/weights/W.safetensors", "weight");
+    let w_b = load_weight_tensor("demos/weights/W.gguf", "weight");
+    println(str_concat("auto_st_n=", to_str(len(w_a))));
+    println(str_concat("auto_gg_n=", to_str(len(w_b))));
+
+    println("load_weights_gguf_st_ok");
+}

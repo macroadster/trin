@@ -1,0 +1,24 @@
+// Span numeric kernels via builtins (map / sum / zip_with / dot)
+fn main() {
+    let xs = [1.0, 2.0, 3.0, 4.0];
+    let ys = [1.0, 1.0, 1.0, 1.0];
+
+    let doubled = map((x) => x * 2.0, xs);
+    println(str_concat("doubled: ", to_str(doubled)));
+
+    let total = sum(xs);
+    println(str_concat("sum: ", to_str(total)));
+
+    let added = span_add(xs, ys);
+    println(str_concat("span_add: ", to_str(added)));
+
+    let d = dot(xs, ys);
+    println(str_concat("dot: ", to_str(d)));
+
+    // ternary over dens: empty span gates false → each default
+    let flag =
+        dens(xs)
+            | "non-empty"
+            | "empty";
+    println(flag);
+}

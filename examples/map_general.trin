@@ -1,0 +1,16 @@
+// General unary map-lambda Go codegen beyond mul2 (v0.11)
+
+fn main() {
+    let xs = [1.0, 2.0, 3.0];
+    let a = 10.0;
+    let ys = map((x) => x * a + 1.0, xs);
+    println(str_concat("ys = ", to_str(ys)));
+
+    let nested = map((x) => x * 3.0, map((y) => y + 1.0, xs));
+    println(str_concat("nested = ", to_str(nested)));
+    println(str_concat("sum = ", to_str(sum(nested))));
+
+    let w = 0.5;
+    let mixed = map((x) => soft_mux(w, x * 2.0, x + 1.0), xs);
+    println(str_concat("mixed = ", to_str(mixed)));
+}

@@ -1,0 +1,43 @@
+// Ternary zip_with + scan reverse-mode AD (v0.14)
+
+fn main() {
+    // sum(zip_with((x,y,z)=>x*s+y+z, [u,v], [p,q], [r,t]))
+    // = s*(u+v) + (p+q) + (r+t)
+    // u=1 v=2 p=3 q=4 r=5 t=6 s=7 → 7*3 + 7 + 11 = 21+7+11=39
+    let names = ["u", "v", "p", "q", "r", "t", "s"];
+    let vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+    let g = grad_expr("sum(zip_with((x,y,z)=>x*s+y+z, [u,v], [p,q], [r,t]))", names, vals);
+    println(str_concat("v = ", to_str(g[0])));
+    println(str_concat("du = ", to_str(g[1])));
+    println(str_concat("dv = ", to_str(g[2])));
+    println(str_concat("dp = ", to_str(g[3])));
+    println(str_concat("dq = ", to_str(g[4])));
+    println(str_concat("dr = ", to_str(g[5])));
+    println(str_concat("dt = ", to_str(g[6])));
+    println(str_concat("ds = ", to_str(g[7])));
+
+    // sum(scan((acc,x)=>acc+x*s, 0, [a,b,c])) = s*(3a+2b+c)  (prefix coeffs)
+    // a=1 b=2 c=3 s=4 → prefixes [4,12,24] sum=40; da=12 db=8 dc=4 ds=1+2+3 + ... wait
+    // scan acc: 0; +a*s → a*s; +b*s → s(a+b); +c*s → s(a+b+c)
+    // sum of outputs = s*(3a+2b+c); a=1 b=2 c=3 s=4 → 4*(3+4+3)=40
+    // da=3s=12 db=2s=8 dc=s=4 ds=3a+2b+c=3+4+3=10
+    let names2 = ["a", "b", "c", "s"];
+    let vals2 = [1.0, 2.0, 3.0, 4.0];
+    let h = grad_expr("sum(scan((acc,x)=>acc+x*s, 0, [a,b,c]))", names2, vals2);
+    println(str_concat("q = ", to_str(h[0])));
+    println(str_concat("da = ", to_str(h[1])));
+    println(str_concat("db = ", to_str(h[2])));
+    println(str_concat("dc = ", to_str(h[3])));
+    println(str_concat("ds = ", to_str(h[4])));
+
+    // reduce over ternary zip: reduce((acc,x)=>acc+x, 0, zip_with((x,y,z)=>x+y*w+z, [p],[q],[r]))
+    // = p + q*w + r; p=2 q=3 r=4 w=0.5 → 2+1.5+4=7.5
+    let names3 = ["p", "q", "r", "w"];
+    let vals3 = [2.0, 3.0, 4.0, 0.5];
+    let m = grad_expr("reduce((acc,x)=>acc+x, 0, zip_with((x,y,z)=>x+y*w+z, [p], [q], [r]))", names3, vals3);
+    println(str_concat("m = ", to_str(m[0])));
+    println(str_concat("dmp = ", to_str(m[1])));
+    println(str_concat("dmq = ", to_str(m[2])));
+    println(str_concat("dmr = ", to_str(m[3])));
+    println(str_concat("dmw = ", to_str(m[4])));
+}

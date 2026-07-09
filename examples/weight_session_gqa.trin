@@ -1,0 +1,53 @@
+// v0.92 — GQA packing helpers + session-wired grouped-query attention
+fn main() {
+    // pure expand: 1 tok, 1 KV head, 2 Q heads, dh=2
+    let row = [1.0, 2.0];
+    let exp = gqa_expand_kv(row, 1, 1, 2, 2);
+    println(str_concat("exp=", to_str(exp)));
+    println(str_concat("exp_match=", to_str((exp[0] == 1.0) * (exp[2] == 1.0) * (len(exp) == 4))));
+    let rep = gqa_repeat_kv_row(row, 1, 2, 2);
+    println(str_concat("rep_match=", to_str((rep[0] == exp[0]) * (rep[3] == exp[3]))));
+
+    let id = open_weight_session("demos/weights/session_gqa.gguf");
+    let x = [3.0, 4.0];
+    // project GQA: Q full heads (4), K/V compact (2)
+    let p = weight_session_attn_proj_gqa(id, "Q", "K", "V", x, 2, 2, 1, 2, 1);
+    let q = p[0];
+    let k = p[1];
+    let v = p[2];
+    println(str_concat("q=", to_str(q)));
+    println(str_concat("k=", to_str(k)));
+    println(str_concat("v=", to_str(v)));
+    println(str_concat("q_match=", to_str((q[0] == 3.0) * (q[1] == 4.0) * (q[2] == 3.0) * (q[3] == 4.0))));
+    println(str_concat("k_match=", to_str((k[0] == 3.0) * (k[1] == 4.0) * (len(k) == 2))));
+
+    // compose: expand + mha
+    let kexp = gqa_expand_kv(k, 1, 1, 2, 2);
+    let vexp = gqa_expand_kv(v, 1, 1, 2, 2);
+    let man = mha(q, kexp, vexp, 4, 2);
+    println(str_concat("man=", to_str(man)));
+
+    let empty = [];
+    let s1 = weight_session_gqa(id, "Q", "K", "V", x, empty, empty, 2, 2, 1, 2, "", 0.0, 0.0, 1);
+    let y1 = s1[0];
+    let K1 = s1[1];
+    let V1 = s1[2];
+    println(str_concat("y1=", to_str(y1)));
+    println(str_concat("kv1_len=", to_str(len(K1))));
+    println(str_concat("gqa_match=", to_str((y1[0] == man[0]) * (y1[1] == man[1]) * (y1[2] == man[2]) * (y1[3] == man[3]))));
+
+    // grow compact KV
+    let s2 = weight_session_gqa(id, "Q", "K", "V", x, K1, V1, 2, 2, 1, 2, "O", 0.0, 0.0, 1);
+    let y2 = s2[0];
+    let K2 = s2[1];
+    println(str_concat("y2=", to_str(y2)));
+    println(str_concat("kv2_len=", to_str(len(K2))));
+    println(str_concat("grow_ok=", to_str(len(K2) == 4)));
+
+    // rope path
+    let sr = weight_session_gqa(id, "Q", "K", "V", x, empty, empty, 2, 2, 1, 2, "", 1.0, 10000.0, 1);
+    println(str_concat("yr_len=", to_str(len(sr[0]))));
+
+    close_weight_session(id);
+    println("weight_session_gqa_ok");
+}

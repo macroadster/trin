@@ -1,0 +1,39 @@
+// v0.89 — fused session linear: block-stream Q dots without full-tile f32 decode
+fn main() {
+    // F32 parity with non-fused path
+    let id = open_weight_session("demos/weights/toy.gguf");
+    let x = [1.0, 0.0, -1.0];
+    let y = weight_session_linear(id, "weight", x, 2, 3, 1);
+    let yf = weight_session_linear_fused(id, "weight", x, 2, 3, 1);
+    println(str_concat("y=", to_str(y)));
+    println(str_concat("yf=", to_str(yf)));
+    println(str_concat("f32_match=", to_str((yf[0] == y[0]) * (yf[1] == y[1]))));
+    let t0 = weight_session_linear_fused_tile(id, "weight", x, 3, 0, 1);
+    let t1 = weight_session_linear_fused_tile(id, "weight", x, 3, 1, 1);
+    println(str_concat("tile_match=", to_str((t0[0] == yf[0]) * (t1[0] == yf[1]))));
+    close_weight_session(id);
+
+    // Q4_0: fused vs windowed linear reference
+    let qid = open_weight_session("demos/weights/W_q4_0.gguf");
+    let xq = [
+        1.0, 0.0, -1.0, 0.5, 0.25, -0.5, 1.0, 0.0,
+        -1.0, 0.5, 0.25, -0.5, 1.0, 0.0, -1.0, 0.5,
+        0.25, -0.5, 1.0, 0.0, -1.0, 0.5, 0.25, -0.5,
+        1.0, 0.0, -1.0, 0.5, 0.25, -0.5, 1.0, 0.0
+    ];
+    let yq = weight_session_linear(qid, "weight", xq, 2, 32, 1);
+    let yqf = weight_session_linear_fused(qid, "weight", xq, 2, 32, 1);
+    println(str_concat("yq=", to_str(yq)));
+    println(str_concat("yqf=", to_str(yqf)));
+    println(str_concat("q4_match=", to_str((yqf[0] == yq[0]) * (yqf[1] == yq[1]))));
+    let r1 = weight_session_linear_fused_tile(qid, "weight", xq, 32, 1, 1);
+    println(str_concat("q4_tile_match=", to_str(r1[0] == yqf[1])));
+    close_weight_session(qid);
+
+    // one-shot fused
+    let y1 = load_gguf_linear_fused("demos/weights/W.gguf", "weight", x, 2, 3, 2);
+    println(str_concat("oneshot=", to_str(y1)));
+    println(str_concat("oneshot_match=", to_str((y1[0] == y[0]) * (y1[1] == y[1]))));
+
+    println("weight_session_linear_fused_ok");
+}

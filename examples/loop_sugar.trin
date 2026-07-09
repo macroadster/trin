@@ -1,0 +1,42 @@
+// v1.01 loop/for sugar: when / over / for-in / range
+// All desugar onto gate|pure|each + map (no real branch keywords).
+
+fn main() {
+    // range helpers
+    let r0 = range(5);           // [0,1,2,3,4]
+    let r1 = range(2, 6);        // [2,3,4,5]
+    let r2 = range(0, 10, 3);    // [0,3,6,9]
+    println(str_concat("r0=", to_str(r0)));
+    println(str_concat("r1=", to_str(r1)));
+    println(str_concat("r2=", to_str(r2)));
+
+    // when g do e  ⇒  g | e | 0
+    let a = when (3 > 1) do 42;
+    let b = when (1 > 3) do 99;
+    println(str_concat("when_t=", to_str(a)));
+    println(str_concat("when_f=", to_str(b)));
+
+    // over xs as x do e  ⇒  map((x)=>e, xs)
+    let xs = [1.0, 2.0, 3.0];
+    let doubled = over xs as x do x * 2.0;
+    println(str_concat("over=", to_str(doubled)));
+
+    // for x in xs do e  ⇒  map((x)=>e, xs)
+    let squares = for i in range(4) do i * i;
+    println(str_concat("for=", to_str(squares)));
+
+    // compose: sum of for-range
+    let s = sum(for i in range(1, 5) do i * 1.0);
+    println(str_concat("sum_for=", to_str(s)));
+
+    // empty over
+    let empty = over [] as x do x + 1.0;
+    println(str_concat("empty_len=", to_str(len(empty))));
+
+    // accept marker
+    let ok = (a == 42) and (b == 0) and (s > 9.9) and (s < 10.1);
+    let ok2 = (len(squares) == 4) and (len(doubled) == 3) and (len(empty) == 0);
+    let mark = (ok and ok2) | 1 | 0;
+    println(str_concat("loop_sugar_ok=", to_str(mark)));
+    when (mark == 1) do println("loop_sugar_ok");
+}

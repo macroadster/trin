@@ -1,0 +1,13 @@
+// Runtime dynamic feature dispatch demo (v0.30)
+// @trin_hw_vlen / @trin_hw_isa_code are lowered with CPUID detect in the binary
+// (not just emit-time host bake). Portable @trin_vlen stays 16.
+// Probes (when linked via MLIR→LLVM): hw_vlen matches running CPU; portable = 16.
+
+fn main() {
+    let s = sum([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    println(str_concat("sum8 = ", to_str(s)));
+    println("mlir_vlen_probe_target = 16");
+    println("mlir_hw_vlen_note = runtime_cpuid_dispatch");
+    println("mlir_hw_dispatch = runtime");
+    println("mlir_hw_isa_codes = portable:0 sse:1 avx:2 avx512:3 sve:4 neon:5");
+}

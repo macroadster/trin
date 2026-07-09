@@ -1,0 +1,40 @@
+// v0.86 — retained weight session: one mmap open, multi-tensor load, close
+fn main() {
+    let id = open_weight_session("demos/weights/toy.gguf");
+    println(str_concat("id=", to_str(id)));
+    let mapped = weight_session_mapped(id);
+    println(str_concat("mapped=", to_str(mapped)));
+    let names = weight_session_list(id);
+    println(str_concat("names=", to_str(names)));
+    let meta = weight_session_meta(id, "general.name");
+    println(str_concat("meta=", meta));
+    let sw = weight_session_shape(id, "weight");
+    println(str_concat("shape_w=", to_str(sw)));
+    let w = weight_session_tensor(id, "weight");
+    let b = weight_session_tensor(id, "bias");
+    println(str_concat("n_w=", to_str(len(w))));
+    println(str_concat("n_b=", to_str(len(b))));
+    let q = quantize_absmean(w);
+    let x = [1.0, 0.0, -1.0];
+    let y = linear_trit(q[0], x, 2, 3, q[1]);
+    println(str_concat("y=", to_str(y)));
+    close_weight_session(id);
+    // second close is idempotent
+    close_weight_session(id);
+
+    // safetensors session
+    let sid = open_weight_session("demos/weights/toy.safetensors");
+    let aw = weight_session_tensor(sid, "weight");
+    let ab = weight_session_tensor(sid, "bias");
+    println(str_concat("st_n_w=", to_str(len(aw))));
+    println(str_concat("st_n_b=", to_str(len(ab))));
+    close_weight_session(sid);
+
+    // q4 single-tensor session
+    let qid = open_weight_session("demos/weights/W_q4_0.gguf");
+    let qw = weight_session_tensor(qid, "weight");
+    println(str_concat("q4_n=", to_str(len(qw))));
+    close_weight_session(qid);
+
+    println("weight_session_ok");
+}

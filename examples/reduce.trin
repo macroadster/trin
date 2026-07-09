@@ -1,0 +1,19 @@
+// Left-fold reduce pure eval + Go/C codegen (v0.13)
+
+fn main() {
+    let xs = [1.0, 2.0, 3.0, 4.0];
+    let s = reduce((acc, x) => acc + x, 0.0, xs);
+    println(str_concat("sum = ", to_str(s)));
+
+    let p = fold((acc, x) => acc * x, 1.0, xs);
+    println(str_concat("prod = ", to_str(p)));
+
+    // free-var body: reduce((acc,x)=>acc + x*k, 0, xs) = k * sum(xs)
+    let k = 2.0;
+    let wk = reduce((acc, x) => acc + x * k, 0.0, xs);
+    println(str_concat("wk = ", to_str(wk)));
+
+    // reduce over map
+    let nested = reduce((acc, x) => acc + x, 0.0, map((z) => z + 1.0, [10.0, 20.0]));
+    println(str_concat("nested = ", to_str(nested)));
+}

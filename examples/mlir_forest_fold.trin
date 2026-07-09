@@ -1,0 +1,9 @@
+// soft_mux forest + multi-word GEMM schedule (v0.40)
+// probe target documented as 80 on emit-mlir / lower path.
+
+fn main() {
+    println("forest_fold_note = soft_mux_forest_gemm_schedule");
+    println("forest_probe_target = 80");
+    println("map_store_peel = span_mul_axpy_16_8_4_residual");
+    println("map_store_peel_probe_target = 550");
+}

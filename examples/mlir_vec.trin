@@ -1,0 +1,16 @@
+// MLIR dialect / vector IR demo (v0.21)
+// emit-mlir always ships soft_mux + span kernels + vector<4xf32> helpers.
+
+fn main() {
+    let s = sum([1.0, 2.0, 3.0, 4.0]);
+    let d = dot([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]);
+    let sa = sum(span_add([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]));
+    let sc = sum(scale(2.0, [1.0, 2.0, 3.0, 4.0]));
+    let m = soft_mux(0.25, 10.0, 2.0);
+    println(str_concat("sum4 = ", to_str(s)));
+    println(str_concat("dot4 = ", to_str(d)));
+    println(str_concat("span_add_sum4 = ", to_str(sa)));
+    println(str_concat("scale_sum4 = ", to_str(sc)));
+    println(str_concat("soft_mux = ", to_str(m)));
+    println("mlir_vec_probe_target = 10");
+}

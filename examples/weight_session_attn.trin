@@ -1,0 +1,47 @@
+// v0.91 — session-wired Q/K/V projections + attn/mha with growing KV
+fn main() {
+    let id = open_weight_session("demos/weights/session_attn.gguf");
+    let x = [3.0, 4.0];
+    // project
+    let p = weight_session_attn_proj(id, "Q", "K", "V", x, 2, 2, 1);
+    let q = p[0];
+    let k = p[1];
+    let v = p[2];
+    println(str_concat("q=", to_str(q)));
+    println(str_concat("k=", to_str(k)));
+    println(str_concat("v=", to_str(v)));
+    // fuse parity: Q is identity → q == x
+    println(str_concat("q_match=", to_str((q[0] == 3.0) * (q[1] == 4.0))));
+    // first step no past, with out proj O
+    let empty = [];
+    let s1 = weight_session_attn(id, "Q", "K", "V", x, empty, empty, 2, 2, "O", 1, 0.0, 0.0, 1);
+    let y1 = s1[0];
+    let K1 = s1[1];
+    let V1 = s1[2];
+    println(str_concat("y1=", to_str(y1)));
+    println(str_concat("kv1_len=", to_str(len(K1))));
+    // grow cache second step
+    let s2 = weight_session_attn(id, "Q", "K", "V", x, K1, V1, 2, 2, "O", 1, 0.0, 0.0, 1);
+    let y2 = s2[0];
+    let K2 = s2[1];
+    println(str_concat("y2=", to_str(y2)));
+    println(str_concat("kv2_len=", to_str(len(K2))));
+    // multi-head path h=2
+    let sm = weight_session_mha(id, "Q", "K", "V", x, empty, empty, 2, 2, 2, "O", 0.0, 0.0, 1);
+    let ym = sm[0];
+    println(str_concat("ym=", to_str(ym)));
+    // rope path (base>0)
+    let sr = weight_session_attn(id, "Q", "K", "V", x, empty, empty, 2, 2, "", 1, 1.0, 10000.0, 1);
+    let yr = sr[0];
+    println(str_concat("yr=", to_str(yr)));
+    // composition: manual proj + attn
+    let p2 = weight_session_attn_proj(id, "Q", "K", "V", x, 2, 2, 1);
+    let man = attn(p2[0], p2[1], p2[2], 2);
+    let s0 = weight_session_attn(id, "Q", "K", "V", x, empty, empty, 2, 2, "", 1, 0.0, 0.0, 1);
+    let y0 = s0[0];
+    println(str_concat("man=", to_str(man)));
+    println(str_concat("y0=", to_str(y0)));
+    println(str_concat("attn_match=", to_str((y0[0] == man[0]) * (y0[1] == man[1]))));
+    close_weight_session(id);
+    println("weight_session_attn_ok");
+}

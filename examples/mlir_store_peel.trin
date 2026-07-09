@@ -1,0 +1,30 @@
+// Auto residual peel for span_add / scale store loops (v0.37)
+// n=10 peels as 8+2 residual on store kernels.
+
+fn main() {
+    // span_add sum: 2*(1..10) = 110
+    let sa = sum(span_add(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    ));
+    // scale*2 sum: 2*(1..10) = 110
+    let sc = sum(scale(2.0, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]));
+    // n=5 residual path: span_add sum = 30
+    let sa5 = sum(span_add(
+        [1.0, 2.0, 3.0, 4.0, 5.0],
+        [1.0, 2.0, 3.0, 4.0, 5.0]
+    ));
+    // n=20: scale*3 sum = 3*(1..20) = 630
+    let sc20 = sum(scale(3.0, [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        17.0, 18.0, 19.0, 20.0
+    ]));
+
+    println(str_concat("sa10 = ", to_str(sa)));
+    println(str_concat("sc10 = ", to_str(sc)));
+    println(str_concat("sa5 = ", to_str(sa5)));
+    println(str_concat("sc20 = ", to_str(sc20)));
+    println("store_peel_probe_target = sa10:110 sc10:110 sa5:30 sc20:630 sum220:220");
+    println("mlir_store_peel_note = span_add_scale_16_8_4_residual");
+}

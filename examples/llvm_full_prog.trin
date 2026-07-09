@@ -1,0 +1,19 @@
+// Full-program LLVM lowering demo (v0.19)
+// link-llvm / --backend llvm emits @main with println (no float host driver).
+
+fn main() {
+    let a = 3.0;
+    let b = 4.0;
+    let p = a * b;
+    let m = soft_mux(0.25, 10.0, 2.0);
+    let s = sum([1.0, 2.0, 3.0, 4.0]);
+    let d = dot([1.0, 2.0], [3.0, 4.0]);
+    let xs = span_add([1.0, 2.0], [3.0, 4.0]);
+    let sx = sum(xs);
+    println(str_concat("product = ", to_str(p)));
+    println(str_concat("soft_mux = ", to_str(m)));
+    println(str_concat("sum = ", to_str(s)));
+    println(str_concat("dot = ", to_str(d)));
+    println(str_concat("span_add sum = ", to_str(sx)));
+    println(str_concat("simd_lane_width = ", to_str(simd_lane_width())));
+}

@@ -1,0 +1,35 @@
+// Soft-mux reverse-mode AD demo (v0.6)
+// y = soft_mux(w, pure, each) = w*pure + (1-w)*each
+// VJP: dw = pure-each, dpure = w, deach = 1-w  (seed dy=1)
+//
+// Composed: z = soft_mux(w, a*x, b)
+//   z = 0.5*(3*4) + 0.5*2 = 7
+//   d/dw = 10, d/da = 2, d/dx = 1.5, d/db = 0.5
+
+fn main() {
+    let w = 0.5;
+    let pure = 10.0;
+    let each = 2.0;
+    let y = soft_mux(w, pure, each);
+    let g = soft_mux_grad(w, pure, each, 1.0);
+    // g = [dw, dpure, deach]
+    println(str_concat("y = ", to_str(y)));
+    println(str_concat("dy/dw = ", to_str(g[0])));
+    println(str_concat("dy/dpure = ", to_str(g[1])));
+    println(str_concat("dy/deach = ", to_str(g[2])));
+
+    let a = 3.0;
+    let x = 4.0;
+    let b = 2.0;
+    let z = soft_mux(w, a * x, b);
+    // analytic grads for composed graph
+    let dw = soft_mux_grad_w(w, a * x, b, 1.0);
+    let da = soft_mux_grad_pure(w, a * x, b, 1.0) * x;
+    let dx = soft_mux_grad_pure(w, a * x, b, 1.0) * a;
+    let db = soft_mux_grad_each(w, a * x, b, 1.0);
+    println(str_concat("z = ", to_str(z)));
+    println(str_concat("dz/dw = ", to_str(dw)));
+    println(str_concat("dz/da = ", to_str(da)));
+    println(str_concat("dz/dx = ", to_str(dx)));
+    println(str_concat("dz/db = ", to_str(db)));
+}

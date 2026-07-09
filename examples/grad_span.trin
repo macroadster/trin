@@ -1,0 +1,40 @@
+// Span-kernel reverse-mode AD (v0.8)
+//
+// sum([1,2,3,4]) = 10; all partials 1
+// dot([1,2,3],[4,5,6]) = 32; da=[4,5,6] db=[1,2,3]
+// y = soft_mux(w, sum([a,b,c]), dot([x,y],[p,q]))
+// w=0.5 a=1 b=2 c=3 x=1 y=2 p=3 q=4
+// sum=6, dot=11, y=8.5
+// d/da=0.5  d/dx=1.5  d/dw=-5
+
+fn main() {
+    let xs = [1.0, 2.0, 3.0, 4.0];
+    let gs = grad_sum(xs);
+    println(str_concat("sum = ", to_str(gs[0])));
+    println(str_concat("dsum/dx0 = ", to_str(gs[1])));
+    println(str_concat("dsum/dx3 = ", to_str(gs[4])));
+
+    let a = [1.0, 2.0, 3.0];
+    let b = [4.0, 5.0, 6.0];
+    let gd = grad_dot(a, b);
+    println(str_concat("dot = ", to_str(gd[0])));
+    println(str_concat("ddot/da0 = ", to_str(gd[1])));
+    println(str_concat("ddot/db2 = ", to_str(gd[6])));
+
+    let names = ["w", "a", "b", "c", "x", "y", "p", "q"];
+    let vals = [0.5, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0];
+    let g = grad_expr("soft_mux(w, sum([a,b,c]), dot([x,y],[p,q]))", names, vals);
+    println(str_concat("y = ", to_str(g[0])));
+    println(str_concat("dy/dw = ", to_str(g[1])));
+    println(str_concat("dy/da = ", to_str(g[2])));
+    println(str_concat("dy/dx = ", to_str(g[5])));
+    println(str_concat("dy/dq = ", to_str(g[8])));
+
+    // loss = sum([a*x, b*x, c*x]) = x*(a+b+c)
+    let names2 = ["a", "b", "c", "x"];
+    let vals2 = [1.0, 2.0, 3.0, 4.0];
+    let h = grad_expr("sum([a*x, b*x, c*x])", names2, vals2);
+    println(str_concat("loss = ", to_str(h[0])));
+    println(str_concat("dloss/dx = ", to_str(h[4])));
+    println(str_concat("dloss/da = ", to_str(h[1])));
+}

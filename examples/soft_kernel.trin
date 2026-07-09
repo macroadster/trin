@@ -1,0 +1,11 @@
+// Pure f32 kernel for emit-llvm (v0.7)
+// y = soft_mux(w, a*x, b)
+
+fn loss(w: f32, a: f32, x: f32, b: f32) {
+    soft_mux(w, a * x, b)
+}
+
+fn main() {
+    let y = soft_mux(0.5, 12.0, 2.0);
+    println(str_concat("kernel probe y = ", to_str(y)));
+}

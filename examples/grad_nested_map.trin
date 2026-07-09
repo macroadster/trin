@@ -1,0 +1,20 @@
+// Nested map reverse-mode AD (v0.11)
+// sum(map((x)=>x*s, map((y)=>y+a, [u,v]))) = s*((u+a)+(v+a))
+
+fn main() {
+    let names = ["u", "v", "a", "s"];
+    let vals = [1.0, 2.0, 3.0, 4.0];
+    let g = grad_expr("sum(map((x)=>x*s, map((y)=>y+a, [u,v])))", names, vals);
+    println(str_concat("v = ", to_str(g[0])));
+    println(str_concat("du = ", to_str(g[1])));
+    println(str_concat("dv = ", to_str(g[2])));
+    println(str_concat("da = ", to_str(g[3])));
+    println(str_concat("ds = ", to_str(g[4])));
+
+    let names2 = ["p", "w"];
+    let vals2 = [5.0, 1.0];
+    let h = grad_expr("sum(map((x)=>x+1, map((y)=>y*2, map((z)=>z-w, [p]))))", names2, vals2);
+    println(str_concat("q = ", to_str(h[0])));
+    println(str_concat("dp = ", to_str(h[1])));
+    println(str_concat("dw = ", to_str(h[2])));
+}

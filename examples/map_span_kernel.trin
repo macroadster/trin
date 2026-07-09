@@ -1,0 +1,11 @@
+// Pure f32 map/span_add kernel for emit-llvm (v0.9)
+// loss = soft_mux(w, sum(span_add([a0,a1],[b0,b1])), sum(map_mul(s,[x0,x1])))
+
+fn loss(w: f32, s: f32, a0: f32, a1: f32, b0: f32, b1: f32, x0: f32, x1: f32) {
+    soft_mux(w, sum(span_add([a0, a1], [b0, b1])), sum(map_mul(s, [x0, x1])))
+}
+
+fn main() {
+    let y = soft_mux(0.25, 4.0, 12.0);
+    println(str_concat("map span kernel probe y = ", to_str(y)));
+}

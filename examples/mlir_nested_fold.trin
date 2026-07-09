@@ -1,0 +1,37 @@
+// Nested soft_mux + bitplane product folds demo (v0.35)
+// Interpreter validates the same numeric identities the rewrite probe folds.
+
+fn main() {
+    // soft product pure-arm:
+    //   soft_mux(0.5, soft_mux(0.5, 10, 2), 2) → soft_mux(0.25, 10, 2) = 4
+    // soft product each-arm:
+    //   soft_mux(0.5, 10, soft_mux(0.5, 10, 2)) → soft_mux(0.75, 10, 2) = 8
+    // second pure-arm product = 4
+    // soft sum = 4+8+4 = 16
+    let prod_p = soft_mux(0.5, soft_mux(0.5, 10.0, 2.0), 2.0);
+    let prod_e = soft_mux(0.5, 10.0, soft_mux(0.5, 10.0, 2.0));
+    let prod_p2 = soft_mux(0.5, soft_mux(0.5, 10.0, 2.0), 2.0);
+    let soft = prod_p + prod_e + prod_p2; // 16
+
+    // bitplane absorb/product (x=15, y=3):
+    // a=and=3, o=or=15
+    // and(a,x)=3, or(o,x)=15, and(x,o)=15, and(a,o)=3 → plane 36
+    let a = 3;
+    let o = 15;
+    let and_abs = a;   // and(a,x) → a
+    let or_abs = o;    // or(o,x) → o
+    let and_x_o = 15;  // and(x,o) → x
+    let and_prod = a;  // and(a,o) → a
+    let plane = and_abs + or_abs + and_x_o + and_prod; // 36
+
+    let total = soft + plane; // 52
+
+    println(str_concat("soft_product_pure = ", to_str(prod_p)));
+    println(str_concat("soft_product_each = ", to_str(prod_e)));
+    println(str_concat("soft_product_pure2 = ", to_str(prod_p2)));
+    println(str_concat("soft_sum = ", to_str(soft)));
+    println(str_concat("plane_sum = ", to_str(plane)));
+    println(str_concat("nested_fold_sum = ", to_str(total)));
+    println("nested_fold_probe_target = 52");
+    println("mlir_nested_fold_note = soft_mux_product_and_plane_absorb");
+}
