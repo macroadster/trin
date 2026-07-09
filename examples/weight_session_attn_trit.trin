@@ -1,0 +1,129 @@
+// v1.10 — session-wired attention on trit-cached projections
+// Fixture: demos/weights/session_attn.gguf (Q/K/V/O dim=2)
+// Prepack once, hit path, parity vs uncached full-tile linear_trit compose.
+// Keep parity checks inline (no helper fns) so Go emit stays free of unused temps.
+
+fn main() {
+    let id = open_weight_session("demos/weights/session_attn.gguf");
+    let x = [3.0, 4.0];
+    let empty = [];
+    let dIn = 2;
+    let dOut = 2;
+    let bp = 1;
+
+    // prepack Q/K/V/O once
+    let p1 = weight_session_prepack_trit_csv(id, "Q,K,V,O", dIn);
+    let p2 = weight_session_prepack_trit_csv(id, "Q,K,V,O", dIn);
+    println(str_concat("prepack_built=", to_str(p1[0])));
+    println(str_concat("prepack_hits1=", to_str(p1[1])));
+    println(str_concat("prepack_built2=", to_str(p2[0])));
+    println(str_concat("prepack_hits2=", to_str(p2[1])));
+    let packs = weight_session_has_trit_pack(id, "Q")
+        * weight_session_has_trit_pack(id, "K")
+        * weight_session_has_trit_pack(id, "V")
+        * weight_session_has_trit_pack(id, "O");
+    println(str_concat("has_packs=", to_str(packs)));
+
+    // project via trit cache
+    let pr = weight_session_attn_proj_trit(id, "Q", "K", "V", x, dIn, dOut, bp);
+    let q = pr[0];
+    let k = pr[1];
+    let v = pr[2];
+    println(str_concat("q=", to_str(q)));
+    println(str_concat("k=", to_str(k)));
+    println(str_concat("v=", to_str(v)));
+
+    // uncached full-tile proj for parity
+    let rq = weight_session_linear_trit(id, "Q", x, dOut, dIn, dOut, bp);
+    let rk = weight_session_linear_trit(id, "K", x, dOut, dIn, dOut, bp);
+    let rv = weight_session_linear_trit(id, "V", x, dOut, dIn, dOut, bp);
+    let qU = rq[0];
+    let kU = rk[0];
+    let vU = rv[0];
+    let dq0 = q[0] - qU[0];
+    let dq0a = (dq0 < 0.0) | (0.0 - dq0) | dq0;
+    let dq1 = q[1] - qU[1];
+    let dq1a = (dq1 < 0.0) | (0.0 - dq1) | dq1;
+    let dk0 = k[0] - kU[0];
+    let dk0a = (dk0 < 0.0) | (0.0 - dk0) | dk0;
+    let dk1 = k[1] - kU[1];
+    let dk1a = (dk1 < 0.0) | (0.0 - dk1) | dk1;
+    let dv0 = v[0] - vU[0];
+    let dv0a = (dv0 < 0.0) | (0.0 - dv0) | dv0;
+    let dv1 = v[1] - vU[1];
+    let dv1a = (dv1 < 0.0) | (0.0 - dv1) | dv1;
+    let proj_ok = (dq0a < 0.0001) * (dq1a < 0.0001)
+        * (dk0a < 0.0001) * (dk1a < 0.0001)
+        * (dv0a < 0.0001) * (dv1a < 0.0001);
+    println(str_concat("proj_ok=", to_str(proj_ok)));
+
+    // first step, no past, with O
+    let s1 = weight_session_attn_trit(id, "Q", "K", "V", x, empty, empty, dIn, dOut, "O", 1, 0.0, 0.0, bp);
+    let y1 = s1[0];
+    let K1 = s1[1];
+    let V1 = s1[2];
+    println(str_concat("y1=", to_str(y1)));
+    println(str_concat("kv1_len=", to_str(len(K1))));
+
+    // manual compose: uncached QKV + attn + O
+    let man0 = attn(qU, kU, vU, dOut);
+    let ro = weight_session_linear_trit(id, "O", man0, dOut, dOut, dOut, bp);
+    let man = ro[0];
+    let dy0 = y1[0] - man[0];
+    let dy0a = (dy0 < 0.0) | (0.0 - dy0) | dy0;
+    let dy1 = y1[1] - man[1];
+    let dy1a = (dy1 < 0.0) | (0.0 - dy1) | dy1;
+    let y1_ok = (dy0a < 0.0001) * (dy1a < 0.0001);
+    println(str_concat("y1_ok=", to_str(y1_ok)));
+
+    // grow KV
+    let s2 = weight_session_attn_trit(id, "Q", "K", "V", x, K1, V1, dIn, dOut, "O", 1, 0.0, 0.0, bp);
+    let y2 = s2[0];
+    let K2 = s2[1];
+    println(str_concat("y2=", to_str(y2)));
+    println(str_concat("kv2_len=", to_str(len(K2))));
+    let grow_ok = (len(K2) == 4);
+    println(str_concat("grow_ok=", to_str(grow_ok)));
+
+    // multi-head path
+    let sm = weight_session_mha_trit(id, "Q", "K", "V", x, empty, empty, dIn, dOut, 2, "O", 0.0, 0.0, bp);
+    let ym = sm[0];
+    println(str_concat("ym=", to_str(ym)));
+    let mha_ok = (len(ym) == 2);
+    println(str_concat("mha_ok=", to_str(mha_ok)));
+
+    // rope path
+    let sr = weight_session_attn_trit(id, "Q", "K", "V", x, empty, empty, dIn, dOut, "", 1, 1.0, 10000.0, bp);
+    let yr = sr[0];
+    println(str_concat("yr=", to_str(yr)));
+    let rope_ok = (len(yr) == 2);
+    println(str_concat("rope_ok=", to_str(rope_ok)));
+
+    // scalar vs bitplane parity
+    let ss = weight_session_attn_trit(id, "Q", "K", "V", x, empty, empty, dIn, dOut, "O", 1, 0.0, 0.0, 0);
+    let ps0 = y1[0] - ss[0][0];
+    let ps0a = (ps0 < 0.0) | (0.0 - ps0) | ps0;
+    let ps1 = y1[1] - ss[0][1];
+    let ps1a = (ps1 < 0.0) | (0.0 - ps1) | ps1;
+    let plane_ok = (ps0a < 0.0001) * (ps1a < 0.0001);
+    println(str_concat("plane_ok=", to_str(plane_ok)));
+
+    // packs retained
+    let p3 = weight_session_prepack_trit_csv(id, "Q,K,V,O", dIn);
+    let packs_after = weight_session_has_trit_pack(id, "Q")
+        * weight_session_has_trit_pack(id, "K")
+        * weight_session_has_trit_pack(id, "V")
+        * weight_session_has_trit_pack(id, "O");
+    println(str_concat("packs_after=", to_str(packs_after)));
+    println(str_concat("prepack_after_hits=", to_str(p3[1])));
+
+    let hit_ok = (p1[0] == 4) * (p1[1] == 0) * (p2[0] == 0) * (p2[1] == 4)
+        * packs * packs_after * (p3[1] == 4);
+    let parity_ok = proj_ok * y1_ok * plane_ok * grow_ok * mha_ok * rope_ok;
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("weight_session_attn_trit_ok=", to_str(hit_ok * parity_ok)));
+    println("weight_session_attn_trit_ok");
+
+    close_weight_session(id);
+}

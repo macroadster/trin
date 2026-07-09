@@ -9797,6 +9797,183 @@ func (it *Interpreter) installBuiltins() {
 		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
 	})
 
+	// weight_session_attn_proj_trit(id, q, k, v, x, dIn, dOut [, bitplane]) → [q,k,v] (v1.10)
+	nat("weight_session_attn_proj_trit", func(args []Value) (Value, error) {
+		if len(args) < 7 || args[4].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_attn_proj_trit(id, qName, kName, vName, x, dIn, dOut [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_proj_trit: " + err.Error()}
+		}
+		xspan := args[4].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		bitplane := false
+		if len(args) >= 8 {
+			bitplane = args[7].AsFloat() != 0 || args[7].AsInt() != 0
+		}
+		q, k, v, err := s.AttnProjTrit(strArg(args[1]), strArg(args[2]), strArg(args[3]), x, args[5].AsInt(), args[6].AsInt(), bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_proj_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(q), f32SliceToSpan(k), f32SliceToSpan(v)}), nil
+	})
+	// weight_session_attn_trit(id, q,k,v, x, Kpast, Vpast, dIn, dOut [, o] [, h] [, pos] [, base] [, bitplane])
+	nat("weight_session_attn_trit", func(args []Value) (Value, error) {
+		if len(args) < 9 || args[4].Kind != VSpan || args[5].Kind != VSpan || args[6].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_attn_trit(id, qName, kName, vName, x, Kpast, Vpast, dIn, dOut [, oName] [, h] [, pos] [, base] [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[4].Span)
+		Kp := toF32(args[5].Span)
+		Vp := toF32(args[6].Span)
+		dIn, dOut := args[7].AsInt(), args[8].AsInt()
+		oName := ""
+		h := 1
+		pos, base := 0.0, 0.0
+		bitplane := false
+		if len(args) >= 10 {
+			oName = strArg(args[9])
+		}
+		if len(args) >= 11 {
+			h = args[10].AsInt()
+		}
+		if len(args) >= 12 {
+			pos = args[11].AsFloat()
+		}
+		if len(args) >= 13 {
+			base = args[12].AsFloat()
+		}
+		if len(args) >= 14 {
+			bitplane = args[13].AsFloat() != 0 || args[13].AsInt() != 0
+		}
+		y, kn, vn, err := s.SessionAttnTrit(strArg(args[1]), strArg(args[2]), strArg(args[3]), oName, x, Kp, Vp, dIn, dOut, h, pos, base, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+	// weight_session_mha_trit — same as attn_trit with explicit heads (h required after oName)
+	nat("weight_session_mha_trit", func(args []Value) (Value, error) {
+		if len(args) < 10 || args[4].Kind != VSpan || args[5].Kind != VSpan || args[6].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_mha_trit(id, qName, kName, vName, x, Kpast, Vpast, dIn, dOut, h [, oName] [, pos] [, base] [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_mha_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[4].Span)
+		Kp := toF32(args[5].Span)
+		Vp := toF32(args[6].Span)
+		dIn, dOut, h := args[7].AsInt(), args[8].AsInt(), args[9].AsInt()
+		oName := ""
+		pos, base := 0.0, 0.0
+		bitplane := false
+		if len(args) >= 11 {
+			oName = strArg(args[10])
+		}
+		if len(args) >= 12 {
+			pos = args[11].AsFloat()
+		}
+		if len(args) >= 13 {
+			base = args[12].AsFloat()
+		}
+		if len(args) >= 14 {
+			bitplane = args[13].AsFloat() != 0 || args[13].AsInt() != 0
+		}
+		y, kn, vn, err := s.SessionAttnTrit(strArg(args[1]), strArg(args[2]), strArg(args[3]), oName, x, Kp, Vp, dIn, dOut, h, pos, base, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_mha_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+	// weight_session_attn_proj_gqa_trit(id, q,k,v, x, dIn, nHeads, nKVHeads, dh [, bitplane]) → [q,k,v]
+	nat("weight_session_attn_proj_gqa_trit", func(args []Value) (Value, error) {
+		if len(args) < 9 || args[4].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_attn_proj_gqa_trit(id, q,k,v, x, dIn, nHeads, nKVHeads, dh [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_proj_gqa_trit: " + err.Error()}
+		}
+		xspan := args[4].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		bitplane := false
+		if len(args) >= 10 {
+			bitplane = args[9].AsFloat() != 0 || args[9].AsInt() != 0
+		}
+		q, k, v, err := s.AttnProjGQATrit(strArg(args[1]), strArg(args[2]), strArg(args[3]), x, args[5].AsInt(), args[6].AsInt(), args[7].AsInt(), args[8].AsInt(), bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_attn_proj_gqa_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(q), f32SliceToSpan(k), f32SliceToSpan(v)}), nil
+	})
+	// weight_session_gqa_trit(id, q,k,v, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh [, o] [, pos] [, base] [, bitplane])
+	nat("weight_session_gqa_trit", func(args []Value) (Value, error) {
+		if len(args) < 11 || args[4].Kind != VSpan || args[5].Kind != VSpan || args[6].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_gqa_trit(id, q,k,v, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh [, oName] [, pos] [, base] [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[4].Span)
+		Kp := toF32(args[5].Span)
+		Vp := toF32(args[6].Span)
+		dIn := args[7].AsInt()
+		nHeads, nKV, dh := args[8].AsInt(), args[9].AsInt(), args[10].AsInt()
+		oName := ""
+		pos, base := 0.0, 0.0
+		bitplane := false
+		if len(args) >= 12 {
+			oName = strArg(args[11])
+		}
+		if len(args) >= 13 {
+			pos = args[12].AsFloat()
+		}
+		if len(args) >= 14 {
+			base = args[13].AsFloat()
+		}
+		if len(args) >= 15 {
+			bitplane = args[14].AsFloat() != 0 || args[14].AsInt() != 0
+		}
+		y, kn, vn, err := s.SessionAttnGQATrit(strArg(args[1]), strArg(args[2]), strArg(args[3]), oName, x, Kp, Vp, dIn, nHeads, nKV, dh, pos, base, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
 	// weight_session_layer_stack(id, wCSV, x, dim [, gainCSV] [, modeCSV] [, tileRows] [, eps])
 	// Chains residual fused-linear + RMSNorm layers on one session (v0.90).
 	nat("weight_session_layer_stack", func(args []Value) (Value, error) {

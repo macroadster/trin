@@ -254,12 +254,20 @@ weight_session_prepack_trit_csv(id, wCSV, K) → [built, hits]
 weight_session_attn_proj(id, q,k,v, x, dIn, dOut [, tileRows]) → [q,k,v]
 weight_session_attn(id, q,k,v, x, Kpast, Vpast, dIn, dOut [, o] [, h] [, pos] [, base] [, tile]) → [y,K,V]
 weight_session_mha(id, q,k,v, x, Kpast, Vpast, dIn, dOut, h [, o] [, pos] [, base] [, tile]) → [y,K,V]
+// v1.10 session-wired QKV + attn/mha on trit prepack cache
+weight_session_attn_proj_trit(id, q,k,v, x, dIn, dOut [, bitplane]) → [q,k,v]
+weight_session_attn_trit(id, q,k,v, x, Kpast, Vpast, dIn, dOut [, o] [, h] [, pos] [, base] [, bitplane]) → [y,K,V]
+weight_session_mha_trit(id, q,k,v, x, Kpast, Vpast, dIn, dOut, h [, o] [, pos] [, base] [, bitplane]) → [y,K,V]
 // v0.92 GQA packing + session-wired grouped-query attention
 gqa_expand_kv(kv, nTok, nKVHeads, nHeads, dh)
 gqa_repeat_kv_row(row, nKVHeads, nHeads, dh)
 weight_session_attn_proj_gqa(id, q,k,v, x, dIn, nHeads, nKVHeads, dh [, tile]) → [q,k,v]
 weight_session_gqa(id, q,k,v, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh
                    [, o] [, pos] [, base] [, tile]) → [y,Knew,Vnew]  // compact KV
+// v1.10 GQA on trit prepack cache
+weight_session_attn_proj_gqa_trit(id, q,k,v, x, dIn, nHeads, nKVHeads, dh [, bitplane]) → [q,k,v]
+weight_session_gqa_trit(id, q,k,v, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh
+                        [, o] [, pos] [, base] [, bitplane]) → [y,Knew,Vnew]
 ```
 
 ### Transformer ops
@@ -322,6 +330,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/weight_session_trit_cache.trin` prepacks once, hits cache, and checks cached scalar/planes parity.
 `examples/tiny_gguf_decode_trit.trin` prepacks tiny_llm linears once and runs multi-token decode on the hit path.
 `examples/weight_session_layer_stack_trit.trin` prepacks W0,W1 once and chains residual/plain RMSNorm blocks on the trit cache.
+`examples/weight_session_attn_trit.trin` prepacks Q/K/V/O once and runs growing-KV attn/mha on trit-cached projections.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -367,16 +376,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Session trit prepack cache + `linear_trit_cached` (v1.07) | Cache is process-local; dropped on close |
 | Tiny GGUF decode via trit cache (v1.08) | Trit quant tokens may differ from fused-f32 decode |
 | Trit residual stack on prepack cache (v1.09) | Square dim×dim layers; not full attn blocks |
+| Session attn on trit projections (v1.10) | Attention math f32; only projs use trit packs |
 
-### Acceptance (v1.09)
+### Acceptance (v1.10)
 
-- `go test` green (weights LayerStackTrit + interp layer_stack_trit demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_layer_stack_trit`
-- `./trin run examples/weight_session_layer_stack_trit.trin` shows `weight_session_layer_stack_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
-- Prior v1.08 demos still pass (`tiny_gguf_decode_trit_ok`)
+- `go test` green (weights AttnTrit/GQATrit + interp attn_trit demo)
+- `bash scripts/e2e_native.sh` green including `weight_session_attn_trit`
+- `./trin run examples/weight_session_attn_trit.trin` shows `weight_session_attn_trit_ok` / `cache_hit_ok=1` / `parity_ok=1`
+- Prior v1.09 demos still pass (`weight_session_layer_stack_trit_ok`)
 
 ## Next
 
+- v1.10: session-wired attn/MHA/GQA on trit-cached projections
 - v1.09: multi-layer residual stack on trit-cached linears
 - v1.08: wire cached trit linear into tiny GGUF decode
 - v1.07: session trit prepack cache (skip re-quant/re-pack on repeated matvec)
@@ -386,5 +397,5 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; session-wired attn path on trit-cached projections
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; full decode loop on trit-attn blocks
 

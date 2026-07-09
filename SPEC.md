@@ -706,7 +706,7 @@ kernels, KV growth, deterministic sampling, CSV + GGUF/safetensors (incl. common
 block quants, full IQ1/IQ2/IQ3 families + IQ4_NL/XS + TQ1_0/TQ2_0, mmap open,
 retained sessions, windowed partial decode, tiled session matvec, fused quant
 linear, multi-layer residual stack, session-wired multi-head attention, GQA
-packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + portable kernels + PTX emitters + offline ptxas cubin + host buffer stubs. Tokenizer + GGUF session decode (v1.04). SIMD trit matvec + local BPE sidecar (v1.05). Session packed trit linear (v1.06). Session trit prepack cache (v1.07). Tiny GGUF decode via trit cache (v1.08). Trit residual layer stack (v1.09). Out of scope: multi-GPU, competitive tok/s, live driver launch, HF sentencepiece protobuf, network fetch.
+packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + portable kernels + PTX emitters + offline ptxas cubin + host buffer stubs. Tokenizer + GGUF session decode (v1.04). SIMD trit matvec + local BPE sidecar (v1.05). Session packed trit linear (v1.06). Session trit prepack cache (v1.07). Tiny GGUF decode via trit cache (v1.08). Trit residual layer stack (v1.09). Session attn/MHA/GQA on trit projections (v1.10). Out of scope: multi-GPU, competitive tok/s, live driver launch, HF sentencepiece protobuf, network fetch.
 
 - **1.01** — loop/for surface sugar: `when g do e`, `over xs as x do e`, `for x in xs do e` desugar to ternary/map; `range` half-open i32 span builtin; Go + interpreter parity demo `examples/loop_sugar.trin`
 - **1.04** — char/token table tokenizer (`open_vocab`/`vocab_encode`/`vocab_decode`/`load_text`) + multi-tensor `tiny_llm.gguf` session greedy decode demo; CUDA device launch still deferred
@@ -715,3 +715,4 @@ packing helpers), and compiled demos. CUDA path (v1.02–v1.03): device probe + 
 - **1.07** — session trit prepack cache: `weight_session_prepack_trit` / `weight_session_linear_trit_cached` retain absmean trit + packed planes across matvecs
 - **1.08** — tiny GGUF decode on trit cache: prepack Q/K/V/O/FFN/lm_head once, reuse `weight_session_linear_trit_cached` across tokens (`examples/tiny_gguf_decode_trit.trin`)
 - **1.09** — multi-layer residual trit stack: `weight_session_forward_block_trit` / `weight_session_layer_stack_trit` / `weight_session_prepack_trit_csv` on shared prepack cache
+- **1.10** — session attn/MHA/GQA on trit packs: `weight_session_attn_trit` / `mha_trit` / `gqa_trit` + proj variants; projections cached, attention f32

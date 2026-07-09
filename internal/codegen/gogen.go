@@ -9887,6 +9887,141 @@ func (s *weightSess) sessionAttnGQA(qName, kName, vName, oName string, x, Kpast,
 	return y, Knew, Vnew, nil
 }
 
+// --- v1.10 trit-cached session attention ---
+func (s *weightSess) attnProjTrit(qName, kName, vName string, x []float32, dIn, dOut int, bitplane bool) (q, k, v []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dIn <= 0 || dOut <= 0 || len(x) < dIn {
+		return nil, nil, nil, fmt.Errorf("attn_proj_trit: bad dims")
+	}
+	xIn := x[:dIn]
+	q, _, err = s.linearTritCached(qName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	k, _, err = s.linearTritCached(kName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	v, _, err = s.linearTritCached(vName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return q, k, v, nil
+}
+
+func (s *weightSess) sessionAttnTrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, dOut, h int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	q, k, v, err := s.attnProjTrit(qName, kName, vName, x, dIn, dOut, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if base > 0 {
+		q = ropeF32(q, pos, base)
+		k = ropeF32(k, pos, base)
+	}
+	if len(Kpast)%dOut != 0 || len(Vpast)%dOut != 0 {
+		return nil, nil, nil, fmt.Errorf("session_attn_trit: past KV not multiple of d")
+	}
+	if len(Kpast) != len(Vpast) {
+		return nil, nil, nil, fmt.Errorf("session_attn_trit: past K/V length mismatch")
+	}
+	Knew = make([]float32, 0, len(Kpast)+dOut)
+	Vnew = make([]float32, 0, len(Vpast)+dOut)
+	Knew = append(Knew, Kpast...)
+	Knew = append(Knew, k...)
+	Vnew = append(Vnew, Vpast...)
+	Vnew = append(Vnew, v...)
+	if h <= 1 {
+		y, err = attnF32(q, Knew, Vnew, dOut)
+	} else {
+		y, err = mhaF32(q, Knew, Vnew, dOut, h)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if oName != "" {
+		y, _, err = s.linearTritCached(oName, y, dOut, dOut, bitplane)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return y, Knew, Vnew, nil
+}
+
+func (s *weightSess) attnProjGQATrit(qName, kName, vName string, x []float32, dIn, nHeads, nKVHeads, dh int, bitplane bool) (q, k, v []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dIn <= 0 || nHeads <= 0 || nKVHeads <= 0 || dh <= 0 || len(x) < dIn {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit: bad dims")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit: nHeads must be multiple of nKVHeads")
+	}
+	dQ := nHeads * dh
+	dKV := nKVHeads * dh
+	xIn := x[:dIn]
+	q, _, err = s.linearTritCached(qName, xIn, dQ, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	k, _, err = s.linearTritCached(kName, xIn, dKV, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	v, _, err = s.linearTritCached(vName, xIn, dKV, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return q, k, v, nil
+}
+
+func (s *weightSess) sessionAttnGQATrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	q, k, v, err := s.attnProjGQATrit(qName, kName, vName, x, dIn, nHeads, nKVHeads, dh, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dQ := nHeads * dh
+	dKV := nKVHeads * dh
+	if base > 0 {
+		q = ropeHeads(q, nHeads, dh, pos, base)
+		k = ropeHeads(k, nKVHeads, dh, pos, base)
+	}
+	if len(Kpast)%dKV != 0 || len(Vpast)%dKV != 0 {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past KV not multiple of dKV=%d", dKV)
+	}
+	if len(Kpast) != len(Vpast) {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past K/V length mismatch")
+	}
+	Knew = make([]float32, 0, len(Kpast)+dKV)
+	Vnew = make([]float32, 0, len(Vpast)+dKV)
+	Knew = append(Knew, Kpast...)
+	Knew = append(Knew, k...)
+	Vnew = append(Vnew, Vpast...)
+	Vnew = append(Vnew, v...)
+	nTok := len(Knew) / dKV
+	Kexp, err := gqaExpandKV(Knew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vexp, err := gqaExpandKV(Vnew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y, err = mhaF32(q, Kexp, Vexp, dQ, nHeads)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if oName != "" {
+		y, _, err = s.linearTritCached(oName, y, dQ, dQ, bitplane)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return y, Knew, Vnew, nil
+}
+
 // --- v0.91 session-wired attention ---
 func ropeF32(x []float32, pos, base float64) []float32 {
 	n := len(x)
@@ -10796,6 +10931,153 @@ func biWeightSessionMhaFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos,
 	}
 	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
 }
+
+// --- v1.10 trit session attention bi wrappers ---
+func biWeightSessionAttnProjTrit(id, qn, kn, vn, x, dIn, dOut val) val {
+	return biWeightSessionAttnProjTritB(id, qn, kn, vn, x, dIn, dOut, vI32(0))
+}
+func biWeightSessionAttnProjTritB(id, qn, kn, vn, x, dIn, dOut, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_proj_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	q, k, v, err := s.attnProjTrit(fmtVal(qn), fmtVal(kn), fmtVal(vn), xf, asI(dIn), asI(dOut), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_proj_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(q), f32sToSpan(k), f32sToSpan(v)})
+}
+func biWeightSessionAttnTrit(id, qn, kn, vn, x, Kp, Vp, dIn, dOut val) val {
+	return biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, vStr(""), vI32(1), vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionAttnTritO(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName val) val {
+	return biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, vI32(1), vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionAttnTritOH(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h val) val {
+	return biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionAttnTritOHP(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, pos val) val {
+	return biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, pos, vF32(0), vI32(0))
+}
+func biWeightSessionAttnTritOHPB(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, pos, base val) val {
+	return biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, pos, base, vI32(0))
+}
+func biWeightSessionAttnTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, oName, h, pos, base, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_trit: %v\n", err)
+		os.Exit(1)
+	}
+	toF := func(sp val) []float32 {
+		o := make([]float32, len(sp.items))
+		for i, v := range sp.items {
+			o[i] = float32(asF(v))
+		}
+		return o
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.sessionAttnTrit(fmtVal(qn), fmtVal(kn), fmtVal(vn), fmtVal(oName), toF(x), toF(Kp), toF(Vp), asI(dIn), asI(dOut), asI(h), asF(pos), asF(base), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+func biWeightSessionMhaTrit(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h val) val {
+	return biWeightSessionMhaTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, vStr(""), vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionMhaTritO(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName val) val {
+	return biWeightSessionMhaTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionMhaTritOP(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos val) val {
+	return biWeightSessionMhaTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos, vF32(0), vI32(0))
+}
+func biWeightSessionMhaTritOPB(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos, base val) val {
+	return biWeightSessionMhaTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos, base, vI32(0))
+}
+func biWeightSessionMhaTritFull(id, qn, kn, vn, x, Kp, Vp, dIn, dOut, h, oName, pos, base, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_mha_trit: %v\n", err)
+		os.Exit(1)
+	}
+	toF := func(sp val) []float32 {
+		o := make([]float32, len(sp.items))
+		for i, v := range sp.items {
+			o[i] = float32(asF(v))
+		}
+		return o
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.sessionAttnTrit(fmtVal(qn), fmtVal(kn), fmtVal(vn), fmtVal(oName), toF(x), toF(Kp), toF(Vp), asI(dIn), asI(dOut), asI(h), asF(pos), asF(base), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_mha_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+func biWeightSessionAttnProjGQATrit(id, qn, kn, vn, x, dIn, nH, nKV, dh val) val {
+	return biWeightSessionAttnProjGQATritB(id, qn, kn, vn, x, dIn, nH, nKV, dh, vI32(0))
+}
+func biWeightSessionAttnProjGQATritB(id, qn, kn, vn, x, dIn, nH, nKV, dh, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_proj_gqa_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	q, k, v, err := s.attnProjGQATrit(fmtVal(qn), fmtVal(kn), fmtVal(vn), xf, asI(dIn), asI(nH), asI(nKV), asI(dh), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_attn_proj_gqa_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(q), f32sToSpan(k), f32sToSpan(v)})
+}
+func biWeightSessionGQATrit(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh val) val {
+	return biWeightSessionGQATritFull(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, vStr(""), vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionGQATritO(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName val) val {
+	return biWeightSessionGQATritFull(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, vF32(0), vF32(0), vI32(0))
+}
+func biWeightSessionGQATritOP(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, pos val) val {
+	return biWeightSessionGQATritFull(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, pos, vF32(0), vI32(0))
+}
+func biWeightSessionGQATritOPB(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, pos, base val) val {
+	return biWeightSessionGQATritFull(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, pos, base, vI32(0))
+}
+func biWeightSessionGQATritFull(id, qn, kn, vn, x, Kp, Vp, dIn, nH, nKV, dh, oName, pos, base, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_trit: %v\n", err)
+		os.Exit(1)
+	}
+	toF := func(sp val) []float32 {
+		o := make([]float32, len(sp.items))
+		for i, v := range sp.items {
+			o[i] = float32(asF(v))
+		}
+		return o
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.sessionAttnGQATrit(fmtVal(qn), fmtVal(kn), fmtVal(vn), fmtVal(oName), toF(x), toF(Kp), toF(Vp), asI(dIn), asI(nH), asI(nKV), asI(dh), asF(pos), asF(base), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
 func biWeightSessionLayerStack(id, wCSV, x, dimV val) val {
 	return biWeightSessionLayerStackFull(id, wCSV, x, dimV, vStr(""), vStr(""), vI32(0), vF32(1e-6))
 }
@@ -14170,6 +14452,59 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaOPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
 		default:
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		}
+	case "weight_session_attn_proj_trit":
+		if len(args) >= 8 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnProjTritB(%s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnProjTrit(%s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+		}
+	case "weight_session_attn_trit":
+		switch len(args) {
+		case 9:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
+		case 10:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTritO(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+		case 11:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTritOH(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+		case 12:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTritOHP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+		case 13:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTritOHPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		}
+	case "weight_session_mha_trit":
+		switch len(args) {
+		case 10:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+		case 11:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaTritO(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+		case 12:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaTritOP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+		case 13:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaTritOPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionMhaTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		}
+	case "weight_session_attn_proj_gqa_trit":
+		if len(args) >= 10 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnProjGQATritB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnProjGQATrit(%s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8])
+		}
+	case "weight_session_gqa_trit":
+		switch len(args) {
+		case 11:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQATrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10])
+		case 12:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQATritO(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11])
+		case 13:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQATritOP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12])
+		case 14:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQATritOPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQATritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
 		}
 	case "weight_session_layer_stack":
 		switch len(args) {

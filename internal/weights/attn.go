@@ -319,3 +319,145 @@ func (s *WeightSession) SessionAttnGQA(qName, kName, vName, oName string, x, Kpa
 	}
 	return y, Knew, Vnew, nil
 }
+
+// --- v1.10 trit-cached session attention ---
+
+// AttnProjTrit projects Q/K/V via LinearTritCached (auto-prepack).
+// Weights: Q/K/V are dOut×dIn. bitplane selects packed plane matvec.
+func (s *WeightSession) AttnProjTrit(qName, kName, vName string, x []float32, dIn, dOut int, bitplane bool) (q, k, v []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dIn <= 0 || dOut <= 0 || len(x) < dIn {
+		return nil, nil, nil, fmt.Errorf("attn_proj_trit: bad dims")
+	}
+	xIn := x[:dIn]
+	q, _, err = s.LinearTritCached(qName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_trit Q %q: %w", qName, err)
+	}
+	k, _, err = s.LinearTritCached(kName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_trit K %q: %w", kName, err)
+	}
+	v, _, err = s.LinearTritCached(vName, xIn, dOut, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_trit V %q: %w", vName, err)
+	}
+	return q, k, v, nil
+}
+
+// SessionAttnTrit is SessionAttn with trit-cached projections (and optional O).
+// Bitplane only affects the linear projections; attention math stays f32.
+func (s *WeightSession) SessionAttnTrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, dOut, h int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	q, k, v, err := s.AttnProjTrit(qName, kName, vName, x, dIn, dOut, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if base > 0 {
+		q = RopeF32(q, pos, base)
+		k = RopeF32(k, pos, base)
+	}
+	if len(Kpast)%dOut != 0 || len(Vpast)%dOut != 0 {
+		return nil, nil, nil, fmt.Errorf("session_attn_trit: past KV not multiple of d")
+	}
+	if len(Kpast) != len(Vpast) {
+		return nil, nil, nil, fmt.Errorf("session_attn_trit: past K/V length mismatch")
+	}
+	Knew = make([]float32, 0, len(Kpast)+dOut)
+	Vnew = make([]float32, 0, len(Vpast)+dOut)
+	Knew = append(Knew, Kpast...)
+	Knew = append(Knew, k...)
+	Vnew = append(Vnew, Vpast...)
+	Vnew = append(Vnew, v...)
+	if h <= 1 {
+		y, err = AttnF32(q, Knew, Vnew, dOut)
+	} else {
+		y, err = MHAF32(q, Knew, Vnew, dOut, h)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if oName != "" {
+		y, _, err = s.LinearTritCached(oName, y, dOut, dOut, bitplane)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("session_attn_trit O %q: %w", oName, err)
+		}
+	}
+	return y, Knew, Vnew, nil
+}
+
+// AttnProjGQATrit is AttnProjGQA with trit-cached Q/K/V.
+func (s *WeightSession) AttnProjGQATrit(qName, kName, vName string, x []float32, dIn, nHeads, nKVHeads, dh int, bitplane bool) (q, k, v []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dIn <= 0 || nHeads <= 0 || nKVHeads <= 0 || dh <= 0 || len(x) < dIn {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit: bad dims")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit: nHeads must be multiple of nKVHeads")
+	}
+	dQ := nHeads * dh
+	dKV := nKVHeads * dh
+	xIn := x[:dIn]
+	q, _, err = s.LinearTritCached(qName, xIn, dQ, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit Q %q: %w", qName, err)
+	}
+	k, _, err = s.LinearTritCached(kName, xIn, dKV, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit K %q: %w", kName, err)
+	}
+	v, _, err = s.LinearTritCached(vName, xIn, dKV, dIn, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("attn_proj_gqa_trit V %q: %w", vName, err)
+	}
+	return q, k, v, nil
+}
+
+// SessionAttnGQATrit is SessionAttnGQA with trit-cached projections (+ optional O).
+func (s *WeightSession) SessionAttnGQATrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	q, k, v, err := s.AttnProjGQATrit(qName, kName, vName, x, dIn, nHeads, nKVHeads, dh, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dQ := nHeads * dh
+	dKV := nKVHeads * dh
+	if base > 0 {
+		q = ropeHeads(q, nHeads, dh, pos, base)
+		k = ropeHeads(k, nKVHeads, dh, pos, base)
+	}
+	if len(Kpast)%dKV != 0 || len(Vpast)%dKV != 0 {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past KV not multiple of dKV=%d", dKV)
+	}
+	if len(Kpast) != len(Vpast) {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past K/V length mismatch")
+	}
+	Knew = make([]float32, 0, len(Kpast)+dKV)
+	Vnew = make([]float32, 0, len(Vpast)+dKV)
+	Knew = append(Knew, Kpast...)
+	Knew = append(Knew, k...)
+	Vnew = append(Vnew, Vpast...)
+	Vnew = append(Vnew, v...)
+	nTok := len(Knew) / dKV
+	Kexp, err := GQAExpandKV(Knew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vexp, err := GQAExpandKV(Vnew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y, err = MHAF32(q, Kexp, Vexp, dQ, nHeads)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if oName != "" {
+		y, _, err = s.LinearTritCached(oName, y, dQ, dQ, bitplane)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("session_gqa_trit O %q: %w", oName, err)
+		}
+	}
+	return y, Knew, Vnew, nil
+}

@@ -174,3 +174,255 @@ func TestSessionAttnClosed(t *testing.T) {
 		t.Fatal("closed")
 	}
 }
+
+func TestSessionAttnTritParityAndCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "attn_trit.gguf")
+	// dIn=4, dOut=4 — 4x4 Q/K/V/O
+	dim := 4
+	Q := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	K := []float32{
+		0.5, 0, 0, 0,
+		0, 0.5, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0, 0.5,
+	}
+	V := []float32{
+		2, 0, 0, 0,
+		0, 2, 0, 0,
+		0, 0, 2, 0,
+		0, 0, 0, 2,
+	}
+	O := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	if err := WriteGGUFF32(path,
+		map[string][]float32{"Q": Q, "K": K, "V": V, "O": O},
+		map[string][]uint64{"Q": {4, 4}, "K": {4, 4}, "V": {4, 4}, "O": {4, 4}},
+		map[string]string{"general.name": "attn-trit"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+	x := []float32{1, 2, 3, 4}
+
+	// prepack once
+	built, hits, err := s.PrepackTritCSV("Q,K,V,O", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built != 4 || hits != 0 {
+		t.Fatalf("prepack first built=%d hits=%d", built, hits)
+	}
+	built2, hits2, err := s.PrepackTritCSV("Q,K,V,O", dim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built2 != 0 || hits2 != 4 {
+		t.Fatalf("prepack second built=%d hits=%d", built2, hits2)
+	}
+
+	for _, bp := range []bool{false, true} {
+		// proj parity vs LinearTritCached
+		q, k, v, err := s.AttnProjTrit("Q", "K", "V", x, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qr, _, err := s.LinearTritCached("Q", x, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr, _, err := s.LinearTritCached("K", x, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vr, _, err := s.LinearTritCached("V", x, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < dim; i++ {
+			if !nearAttn(q[i], qr[i], 1e-5) || !nearAttn(k[i], kr[i], 1e-5) || !nearAttn(v[i], vr[i], 1e-5) {
+				t.Fatalf("bp=%v proj %v %v %v vs %v %v %v", bp, q, k, v, qr, kr, vr)
+			}
+		}
+
+		// full step with O, no past/rope
+		y, Knew, Vnew, err := s.SessionAttnTrit("Q", "K", "V", "O", x, nil, nil, dim, dim, 1, 0, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// manual uncached full-tile path (LinearTrit tileRows=M)
+		qU, _, err := s.LinearTrit("Q", x, dim, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kU, _, err := s.LinearTrit("K", x, dim, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vU, _, err := s.LinearTrit("V", x, dim, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		yU, err := AttnF32(qU, kU, vU, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		yU, _, err = s.LinearTrit("O", yU, dim, dim, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < dim; i++ {
+			if !nearAttn(y[i], yU[i], 1e-4) {
+				t.Fatalf("bp=%v y parity i=%d %v vs %v", bp, i, y[i], yU[i])
+			}
+		}
+
+		// grow KV
+		y2, Knew2, Vnew2, err := s.SessionAttnTrit("Q", "K", "V", "O", x, Knew, Vnew, dim, dim, 1, 0, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(Knew2) != 2*dim || len(Vnew2) != 2*dim {
+			t.Fatalf("grow kv %d %d", len(Knew2), len(Vnew2))
+		}
+		_ = y2
+
+		// mha h=2
+		ym, _, _, err := s.SessionAttnTrit("Q", "K", "V", "", x, nil, nil, dim, dim, 2, 0, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ym) != dim {
+			t.Fatal(ym)
+		}
+
+		// rope path
+		yr, _, _, err := s.SessionAttnTrit("Q", "K", "V", "", x, nil, nil, dim, dim, 1, 1.0, 10000, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(yr) != dim {
+			t.Fatal(yr)
+		}
+	}
+
+	if !s.HasTritPack("Q") || !s.HasTritPack("K") || !s.HasTritPack("V") || !s.HasTritPack("O") {
+		t.Fatal("packs missing after use")
+	}
+	if _, _, _, err := s.SessionAttnTrit("Q", "K", "V", "", x[:1], nil, nil, dim, dim, 1, 0, 0, true); err == nil {
+		t.Fatal("short x")
+	}
+}
+
+func TestSessionAttnGQATritParity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gqa_trit.gguf")
+	// dIn=2, nHeads=2, nKV=1, dh=2 → dQ=4, dKV=2
+	// Q: 4x2, K/V: 2x2, O: 4x4
+	Q := []float32{
+		1, 0,
+		0, 1,
+		1, 0,
+		0, 1,
+	}
+	K := []float32{
+		1, 0,
+		0, 1,
+	}
+	V := []float32{
+		1, 0,
+		0, 1,
+	}
+	O := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	if err := WriteGGUFF32(path,
+		map[string][]float32{"Q": Q, "K": K, "V": V, "O": O},
+		map[string][]uint64{"Q": {4, 2}, "K": {2, 2}, "V": {2, 2}, "O": {4, 4}},
+		map[string]string{"general.name": "gqa-trit"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+	x := []float32{3, 4}
+	// prepack with respective K
+	if _, err := s.PrepackTrit("Q", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepackTrit("K", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepackTrit("V", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepackTrit("O", 4); err != nil {
+		t.Fatal(err)
+	}
+
+	q, k, v, err := s.AttnProjGQATrit("Q", "K", "V", x, 2, 2, 1, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q) != 4 || len(k) != 2 || len(v) != 2 {
+		t.Fatalf("shapes q=%d k=%d v=%d", len(q), len(k), len(v))
+	}
+	// uncached proj
+	qU, _, err := s.LinearTrit("Q", x, 4, 2, 4, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kU, _, err := s.LinearTrit("K", x, 2, 2, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vU, _, err := s.LinearTrit("V", x, 2, 2, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range q {
+		if !nearAttn(q[i], qU[i], 1e-4) {
+			t.Fatalf("q i=%d", i)
+		}
+	}
+	for i := range k {
+		if !nearAttn(k[i], kU[i], 1e-4) || !nearAttn(v[i], vU[i], 1e-4) {
+			t.Fatalf("kv i=%d", i)
+		}
+	}
+
+	y, Knew, Vnew, err := s.SessionAttnGQATrit("Q", "K", "V", "O", x, nil, nil, 2, 2, 1, 2, 0, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(y) != 4 || len(Knew) != 2 || len(Vnew) != 2 {
+		t.Fatalf("y/kv lens %d %d %d", len(y), len(Knew), len(Vnew))
+	}
+	// grow
+	_, Knew2, _, err := s.SessionAttnGQATrit("Q", "K", "V", "O", x, Knew, Vnew, 2, 2, 1, 2, 0, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(Knew2) != 4 {
+		t.Fatalf("grow %d", len(Knew2))
+	}
+}
