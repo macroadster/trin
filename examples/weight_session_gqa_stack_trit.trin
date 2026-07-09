@@ -1,0 +1,137 @@
+// v1.14 — multi-layer residual GQA stack + final RMSNorm
+// Fixture: demos/weights/gqa_stack.gguf (2 layers, dim=4 nHeads=2 nKV=1 dh=2)
+// Prepack once; stack ↔ two gqa blocks; grow compact layer-major KV; final_norm.
+
+fn main() {
+    let id = open_weight_session("demos/weights/gqa_stack.gguf");
+    let x = [1.0, 0.5, -0.25, 0.75];
+    let empty = [];
+    let dim = 4;
+    let hidden = 4;
+    let nHeads = 2;
+    let nKV = 1;
+    let dh = 2;
+    let dKV = 2;
+    let bp = 1;
+    let eps = 0.000001;
+    let nLayers = 2;
+
+    // prepack Q/O/Up/K/V (K=dim) + Down (K=hidden)
+    let p1a = weight_session_prepack_trit_csv(id,
+        "L0_q,L0_k,L0_v,L0_o,L0_up,L1_q,L1_k,L1_v,L1_o,L1_up", dim);
+    let p1b = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    let p2a = weight_session_prepack_trit_csv(id,
+        "L0_q,L0_k,L0_v,L0_o,L0_up,L1_q,L1_k,L1_v,L1_o,L1_up", dim);
+    let p2b = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    println(str_concat("prepack_built=", to_str(p1a[0] + p1b[0])));
+    println(str_concat("prepack_hits1=", to_str(p1a[1] + p1b[1])));
+    println(str_concat("prepack_built2=", to_str(p2a[0] + p2b[0])));
+    println(str_concat("prepack_hits2=", to_str(p2a[1] + p2b[1])));
+    let packs = weight_session_has_trit_pack(id, "L0_q")
+        * weight_session_has_trit_pack(id, "L0_k")
+        * weight_session_has_trit_pack(id, "L1_down");
+    println(str_concat("has_packs=", to_str(packs)));
+
+    let qCSV = "L0_q,L1_q";
+    let kCSV = "L0_k,L1_k";
+    let vCSV = "L0_v,L1_v";
+    let oCSV = "L0_o,L1_o";
+    let upCSV = "L0_up,L1_up";
+    let downCSV = "L0_down,L1_down";
+    let anCSV = "L0_an,L1_an";
+    let fnCSV = "L0_fn,L1_fn";
+
+    // manual L0 block
+    let b0 = weight_session_forward_gqa_block_trit(
+        id, "L0_q", "L0_k", "L0_v", "L0_o", "L0_up", "L0_down",
+        x, empty, empty, dim, hidden, nHeads, nKV, dh,
+        "L0_an", "L0_fn", 0.0, 0.0, bp, eps);
+    let y0 = b0[0];
+    let K0 = b0[1];
+    let V0 = b0[2];
+    println(str_concat("y0=", to_str(y0)));
+    println(str_concat("kv0_len=", to_str(len(K0))));
+    let compact0_ok = (len(K0) == dKV) * (len(V0) == dKV);
+
+    // stack both layers
+    let st = weight_session_gqa_stack_trit(
+        id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV,
+        x, empty, empty, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 0.0, 0.0, bp, eps);
+    let ys = st[0];
+    let Kf = st[1];
+    let Vf = st[2];
+    println(str_concat("ys=", to_str(ys)));
+    println(str_concat("kv_flat_len=", to_str(len(Kf))));
+
+    // compose L1 on top of y0
+    let b1 = weight_session_forward_gqa_block_trit(
+        id, "L1_q", "L1_k", "L1_v", "L1_o", "L1_up", "L1_down",
+        y0, empty, empty, dim, hidden, nHeads, nKV, dh,
+        "L1_an", "L1_fn", 0.0, 0.0, bp, eps);
+    let y1m = b1[0];
+    let d0r = ys[0] - y1m[0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = ys[3] - y1m[3];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let stack_match = (d0 < 0.0001) * (d1 < 0.0001);
+    println(str_concat("stack_match=", to_str(stack_match)));
+
+    // flat KV: 2 layers × 1 tok × dKV
+    let flat_ok = (len(Kf) == nLayers * dKV) * (len(Vf) == nLayers * dKV) * compact0_ok;
+    println(str_concat("flat_ok=", to_str(flat_ok)));
+
+    // grow past
+    let st2 = weight_session_gqa_stack_trit(
+        id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV,
+        x, Kf, Vf, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 1.0, 0.0, bp, eps);
+    let Kf2 = st2[1];
+    println(str_concat("kv_flat2_len=", to_str(len(Kf2))));
+    let grow_ok = (len(Kf2) == nLayers * 2 * dKV);
+    println(str_concat("grow_ok=", to_str(grow_ok)));
+
+    // final norm vs rmsnorm unit gain
+    let yf = weight_session_final_norm(id, ys, dim, "final_norm", eps);
+    let yr = rmsnorm(ys, eps, 1.0);
+    let fr0 = yf[0] - yr[0];
+    let f0 = (fr0 < 0.0) | (0.0 - fr0) | fr0;
+    let fr1 = yf[3] - yr[3];
+    let f1 = (fr1 < 0.0) | (0.0 - fr1) | fr1;
+    let final_ok = (f0 < 0.0001) * (f1 < 0.0001);
+    println(str_concat("final_ok=", to_str(final_ok)));
+
+    // plane parity
+    let sts = weight_session_gqa_stack_trit(
+        id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV,
+        x, empty, empty, dim, hidden, nHeads, nKV, dh,
+        anCSV, fnCSV, 0.0, 0.0, 0, eps);
+    let yss = sts[0];
+    let psr0 = ys[0] - yss[0];
+    let ps0 = (psr0 < 0.0) | (0.0 - psr0) | psr0;
+    let psr1 = ys[3] - yss[3];
+    let ps1 = (psr1 < 0.0) | (0.0 - psr1) | psr1;
+    let plane_ok = (ps0 < 0.0001) * (ps1 < 0.0001);
+    println(str_concat("plane_ok=", to_str(plane_ok)));
+
+    let packs_after = weight_session_has_trit_pack(id, "L0_q")
+        * weight_session_has_trit_pack(id, "L1_down");
+    let p3a = weight_session_prepack_trit_csv(id,
+        "L0_q,L0_k,L0_v,L0_o,L0_up,L1_q,L1_k,L1_v,L1_o,L1_up", dim);
+    let p3b = weight_session_prepack_trit_csv(id, "L0_down,L1_down", hidden);
+    println(str_concat("packs_after=", to_str(packs_after)));
+    println(str_concat("prepack_after_hits=", to_str(p3a[1] + p3b[1])));
+
+    let hit_ok = (p1a[0] + p1b[0] == 12) * (p2a[0] + p2b[0] == 0)
+        * (p2a[1] + p2b[1] == 12) * packs * packs_after
+        * (p3a[0] + p3b[0] == 0);
+    let parity_ok = stack_match * plane_ok * final_ok;
+    let decode_ok = flat_ok * grow_ok * (len(y0) == dim) * (len(ys) == dim);
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("decode_ok=", to_str(decode_ok)));
+    println(str_concat("weight_session_gqa_stack_trit_ok=", to_str(hit_ok * parity_ok * decode_ok)));
+    println("weight_session_gqa_stack_trit_ok");
+
+    close_weight_session(id);
+}

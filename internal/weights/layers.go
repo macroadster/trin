@@ -466,3 +466,199 @@ func (s *WeightSession) AttnStackTritCSV(
 	}
 	return y, FlattenLayerKV(Knews), FlattenLayerKV(Vnews), nil
 }
+
+// --- v1.14 multi-layer residual GQA stack + final RMSNorm ---
+
+// ForwardGQABlockTrit runs one residual GQA+FFN block on the trit prepack cache.
+// dim must equal nHeads*dh for residual add; compact past K/V grow by one token
+// of length nKVHeads*dh. Attention uses SessionAttnGQATrit (expand for MHA).
+func (s *WeightSession) ForwardGQABlockTrit(
+	spec AttnLayerSpec,
+	x, Kpast, Vpast []float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: bad dim")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: bad heads")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: nHeads must be multiple of nKVHeads")
+	}
+	if nHeads*dh != dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: dim=%d != nHeads*dh=%d", dim, nHeads*dh)
+	}
+	if spec.Q == "" || spec.K == "" || spec.V == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: Q/K/V required")
+	}
+	if spec.Up == "" || spec.Down == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: FFN Up/Down required")
+	}
+	if spec.Hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: hidden must be > 0")
+	}
+	xIn := x[:dim]
+	attnGain, err := s.loadGain(spec.AttnGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit attn gain %q: %w", spec.AttnGain, err)
+	}
+	xn := RMSNormF32(xIn, eps, attnGain)
+	a, Knew, Vnew, err := s.SessionAttnGQATrit(
+		spec.Q, spec.K, spec.V, spec.O,
+		xn, Kpast, Vpast,
+		dim, nHeads, nKVHeads, dh, pos, base, bitplane,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit attn: %w", err)
+	}
+	if len(a) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: attn out len %d < dim %d", len(a), dim)
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	ffnGain, err := s.loadGain(spec.FFNGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit ffn gain %q: %w", spec.FFNGain, err)
+	}
+	hn := RMSNormF32(hRes, eps, ffnGain)
+	up, _, err := s.LinearTritCached(spec.Up, hn, spec.Hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit up %q: %w", spec.Up, err)
+	}
+	act := SiLUF32(up)
+	down, _, err := s.LinearTritCached(spec.Down, act, dim, spec.Hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit down %q: %w", spec.Down, err)
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+// GQAStackTrit chains ForwardGQABlockTrit over layers with per-layer compact KV caches.
+func (s *WeightSession) GQAStackTrit(
+	layers []AttnLayerSpec,
+	x []float32,
+	Kpasts, Vpasts [][]float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y []float32, Knews, Vnews [][]float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if len(layers) == 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: empty layers")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews = make([][]float32, len(layers))
+	Vnews = make([][]float32, len(layers))
+	for i, spec := range layers {
+		var kp, vp []float32
+		if i < len(Kpasts) {
+			kp = Kpasts[i]
+		}
+		if i < len(Vpasts) {
+			vp = Vpasts[i]
+		}
+		next, kn, vn, e := s.ForwardGQABlockTrit(spec, cur, kp, vp, dim, nHeads, nKVHeads, dh, pos, base, bitplane, eps)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("gqa_stack_trit layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, Knews, Vnews, nil
+}
+
+// GQAStackTritCSV is the language-friendly multi-layer GQA surface.
+// KpastFlat/VpastFlat are layer-major flats of compact dKV = nKVHeads*dh per token.
+// Returns y, KnewFlat, VnewFlat (still compact).
+func (s *WeightSession) GQAStackTritCSV(
+	qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	qs := splitCSV(qCSV)
+	ks := splitCSV(kCSV)
+	vs := splitCSV(vCSV)
+	os_ := splitCSV(oCSV)
+	ups := splitCSV(upCSV)
+	downs := splitCSV(downCSV)
+	ag := splitCSV(attnGainCSV)
+	fg := splitCSV(ffnGainCSV)
+	n := len(qs)
+	if n == 0 || len(ks) != n || len(vs) != n || len(ups) != n || len(downs) != n {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: Q/K/V/Up/Down CSVs must share non-zero length")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: bad heads")
+	}
+	dKV := nKVHeads * dh
+	layers := make([]AttnLayerSpec, n)
+	for i := 0; i < n; i++ {
+		spec := AttnLayerSpec{
+			Q: qs[i], K: ks[i], V: vs[i],
+			Up: ups[i], Down: downs[i],
+			Hidden: hidden,
+		}
+		if i < len(os_) {
+			spec.O = os_[i]
+		}
+		if i < len(ag) {
+			spec.AttnGain = ag[i]
+		}
+		if i < len(fg) {
+			spec.FFNGain = fg[i]
+		}
+		layers[i] = spec
+	}
+	Kpasts, err := SplitLayerKV(KpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := SplitLayerKV(VpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y, Knews, Vnews, err := s.GQAStackTrit(layers, x, Kpasts, Vpasts, dim, nHeads, nKVHeads, dh, pos, base, bitplane, eps)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return y, FlattenLayerKV(Knews), FlattenLayerKV(Vnews), nil
+}
+
+// FinalNorm applies RMSNorm with an optional named gain tensor (empty → unit gain).
+func (s *WeightSession) FinalNorm(gainName string, x []float32, dim int, eps float64) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, fmt.Errorf("final_norm: bad dim")
+	}
+	gain, err := s.loadGain(gainName, dim)
+	if err != nil {
+		return nil, fmt.Errorf("final_norm gain %q: %w", gainName, err)
+	}
+	return RMSNormF32(x[:dim], eps, gain), nil
+}

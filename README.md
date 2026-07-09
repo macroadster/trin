@@ -336,6 +336,7 @@ greedily decodes three tokens on CPU (no CUDA).
 `examples/tiny_gguf_decode_attn_trit.trin` runs multi-token greedy decode with `weight_session_attn_trit` (+ FFN/lm_head on the same packs).
 `examples/weight_session_attn_stack_trit.trin` chains two residual trit-attn+FFN layers with growing layer-major KV flats.
 `examples/tiny_gguf_decode_stack_trit.trin` runs multi-token greedy decode on a 2-layer GGUF via `weight_session_attn_stack_trit`.
+`examples/weight_session_gqa_stack_trit.trin` / `examples/tiny_gguf_decode_gqa_trit.trin` add multi-layer residual GQA + final RMSNorm.
 
 `examples/load_weights_gguf_st.trin` loads the toy fixtures under `demos/weights/`
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
@@ -385,16 +386,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Tiny GGUF decode via trit-attn (v1.11) | Growing-KV session attn_trit + FFN/lm_head packs |
 | Multi-layer trit-attn stack (v1.12) | Residual attn+FFN layers, layer-major KV flats |
 | Multi-layer GGUF decode via stack (v1.13) | 2-layer greedy decode, growing layer-major KV |
+| Multi-layer GQA stack + final-norm (v1.14) | Compact KV flats, residual GQA, final RMSNorm |
 
-### Acceptance (v1.13)
+### Acceptance (v1.14)
 
-- `go test` green (interp `tiny_gguf_decode_stack_trit` demo)
-- `bash scripts/e2e_native.sh` green including `tiny_gguf_decode_stack_trit`
-- `./trin run examples/tiny_gguf_decode_stack_trit.trin` shows `tiny_gguf_decode_stack_trit_ok` / `cache_hit_ok=1` / `parity_ok=1` / `grow_final_ok=1` / `gen_text=EEE`
-- Prior v1.12 demos still pass (`weight_session_attn_stack_trit_ok`)
+- `go test` green (weights GQA stack + interp gqa demos)
+- `bash scripts/e2e_native.sh` green including `weight_session_gqa_stack_trit` / `tiny_gguf_decode_gqa_trit`
+- `./trin run examples/tiny_gguf_decode_gqa_trit.trin` shows `tiny_gguf_decode_gqa_trit_ok` / `cache_hit_ok=1` / `parity_ok=1` / `grow_final_ok=1` / `gen_text=FFF`
+- Prior v1.13 demos still pass (`tiny_gguf_decode_stack_trit_ok`)
 
 ## Next
 
+- v1.14: multi-layer residual GQA stack + final RMSNorm decode
 - v1.13: multi-layer GGUF greedy decode on trit-attn stack
 - v1.12: multi-layer residual trit-attn decoder stack
 - v1.11: multi-token GGUF greedy decode on session trit-attn
@@ -408,5 +411,4 @@ greedily decodes three tokens on CPU (no CUDA).
 - v1.03: PTX emitters + optional ptxas cubin + buffer/plan_launch surface
 - v1.02: additive CUDA path (`cuda_*` probe + portable kernels; cpu-fallback without GPU)
 - v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto; final-norm + GQA multi-layer decode
-
+- Follow-ons (tabled): driver kernel launch (cuModule/cuLaunch), CUBLAS, multi-GPU; HF sentencepiece proto

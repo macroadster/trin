@@ -10255,6 +10255,153 @@ func (it *Interpreter) installBuiltins() {
 		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
 	})
 
+	// weight_session_forward_gqa_block_trit(id, q,k,v,o, up,down, x, Kpast,Vpast, dim, hidden,
+	//   nHeads, nKVHeads, dh [, attnGain] [, ffnGain] [, pos] [, base] [, bitplane] [, eps]) → [y,K,V]
+	// One residual GQA+FFN layer on trit-cached projections (v1.14).
+	nat("weight_session_forward_gqa_block_trit", func(args []Value) (Value, error) {
+		if len(args) < 15 || args[7].Kind != VSpan || args[8].Kind != VSpan || args[9].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_block_trit(id, q,k,v,o, up,down, x, Kpast,Vpast, dim, hidden, nHeads, nKVHeads, dh [, attnGain] [, ffnGain] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_block_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		spec := weights.AttnLayerSpec{
+			Q: strArg(args[1]), K: strArg(args[2]), V: strArg(args[3]), O: strArg(args[4]),
+			Up: strArg(args[5]), Down: strArg(args[6]),
+			Hidden: args[11].AsInt(),
+		}
+		x := toF32(args[7].Span)
+		Kp := toF32(args[8].Span)
+		Vp := toF32(args[9].Span)
+		dim := args[10].AsInt()
+		nHeads, nKV, dh := args[12].AsInt(), args[13].AsInt(), args[14].AsInt()
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 16 {
+			spec.AttnGain = strArg(args[15])
+		}
+		if len(args) >= 17 {
+			spec.FFNGain = strArg(args[16])
+		}
+		if len(args) >= 18 {
+			pos = args[17].AsFloat()
+		}
+		if len(args) >= 19 {
+			base = args[18].AsFloat()
+		}
+		if len(args) >= 20 {
+			bitplane = args[19].AsFloat() != 0 || args[19].AsInt() != 0
+		}
+		if len(args) >= 21 {
+			eps = args[20].AsFloat()
+		}
+		y, kn, vn, err := s.ForwardGQABlockTrit(spec, x, Kp, Vp, dim, nHeads, nKV, dh, pos, base, bitplane, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_forward_gqa_block_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
+	// weight_session_gqa_stack_trit(id, qCSV,kCSV,vCSV,oCSV, upCSV,downCSV, x, KpastFlat,VpastFlat,
+	//   dim, hidden, nHeads, nKVHeads, dh [, attnGainCSV] [, ffnGainCSV] [, pos] [, base] [, bitplane] [, eps])
+	// → [y,Kflat,Vflat] multi-layer residual GQA stack with compact layer-major KV flats (v1.14).
+	nat("weight_session_gqa_stack_trit", func(args []Value) (Value, error) {
+		if len(args) < 15 || args[7].Kind != VSpan || args[8].Kind != VSpan || args[9].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_gqa_stack_trit(id, qCSV,kCSV,vCSV,oCSV, upCSV,downCSV, x, KpastFlat,VpastFlat, dim, hidden, nHeads, nKVHeads, dh [, attnGainCSV] [, ffnGainCSV] [, pos] [, base] [, bitplane] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_stack_trit: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[7].Span)
+		Kp := toF32(args[8].Span)
+		Vp := toF32(args[9].Span)
+		dim, hidden := args[10].AsInt(), args[11].AsInt()
+		nHeads, nKV, dh := args[12].AsInt(), args[13].AsInt(), args[14].AsInt()
+		attnGainCSV, ffnGainCSV := "", ""
+		pos, base := 0.0, 0.0
+		bitplane := false
+		eps := 1e-6
+		if len(args) >= 16 {
+			attnGainCSV = strArg(args[15])
+		}
+		if len(args) >= 17 {
+			ffnGainCSV = strArg(args[16])
+		}
+		if len(args) >= 18 {
+			pos = args[17].AsFloat()
+		}
+		if len(args) >= 19 {
+			base = args[18].AsFloat()
+		}
+		if len(args) >= 20 {
+			bitplane = args[19].AsFloat() != 0 || args[19].AsInt() != 0
+		}
+		if len(args) >= 21 {
+			eps = args[20].AsFloat()
+		}
+		y, kn, vn, err := s.GQAStackTritCSV(
+			strArg(args[1]), strArg(args[2]), strArg(args[3]), strArg(args[4]),
+			strArg(args[5]), strArg(args[6]),
+			attnGainCSV, ffnGainCSV,
+			x, Kp, Vp, dim, hidden, nHeads, nKV, dh, pos, base, bitplane, eps,
+		)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_gqa_stack_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), f32SliceToSpan(kn), f32SliceToSpan(vn)}), nil
+	})
+
+	// weight_session_final_norm(id, x, dim [, gainName] [, eps]) → span
+	// Optional final RMSNorm before lm_head (v1.14). Empty gain → unit gain.
+	nat("weight_session_final_norm", func(args []Value) (Value, error) {
+		if len(args) < 3 || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_final_norm(id, x, dim [, gainName] [, eps])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_final_norm: " + err.Error()}
+		}
+		toF32 := func(sp []Value) []float32 {
+			o := make([]float32, len(sp))
+			for i, v := range sp {
+				o[i] = float32(v.AsFloat())
+			}
+			return o
+		}
+		x := toF32(args[1].Span)
+		dim := args[2].AsInt()
+		gain := ""
+		eps := 1e-6
+		if len(args) >= 4 {
+			gain = strArg(args[3])
+		}
+		if len(args) >= 5 {
+			eps = args[4].AsFloat()
+		}
+		y, err := s.FinalNorm(gain, x, dim, eps)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_final_norm: " + err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+
 	// weight_session_linear_fused(id, name, x, M, K [, tileRows]) → span[f32] (v0.89 block-stream)
 	nat("weight_session_linear_fused", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

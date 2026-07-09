@@ -9950,6 +9950,171 @@ func (s *weightSess) attnStackTritCSV(
 	return cur, flattenLayerKV(Knews), flattenLayerKV(Vnews), nil
 }
 
+// --- v1.14 multi-layer residual GQA stack + final RMSNorm (codegen runtime) ---
+
+func (s *weightSess) forwardGQABlockTrit(
+	qName, kName, vName, oName, upName, downName, attnGain, ffnGain string,
+	x, Kpast, Vpast []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: bad dim")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: bad heads")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: nHeads must be multiple of nKVHeads")
+	}
+	if nHeads*dh != dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: dim=%d != nHeads*dh=%d", dim, nHeads*dh)
+	}
+	if qName == "" || kName == "" || vName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: Q/K/V required")
+	}
+	if upName == "" || downName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: FFN Up/Down required")
+	}
+	if hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: hidden must be > 0")
+	}
+	xIn := x[:dim]
+	ag, err := s.loadGain(attnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	xn := rmsNormF32(xIn, eps, ag)
+	a, Knew, Vnew, err := s.sessionAttnGQATrit(qName, kName, vName, oName, xn, Kpast, Vpast, dim, nHeads, nKVHeads, dh, pos, base, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(a) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_block_trit: attn out len %d < dim %d", len(a), dim)
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	fg, err := s.loadGain(ffnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	hn := rmsNormF32(hRes, eps, fg)
+	up, _, err := s.linearTritCached(upName, hn, hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	act := siLUF32(up)
+	down, _, err := s.linearTritCached(downName, act, dim, hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+func (s *weightSess) gqaStackTritCSV(
+	qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos, base float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	split := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	qs := split(qCSV)
+	ks := split(kCSV)
+	vs := split(vCSV)
+	os_ := split(oCSV)
+	ups := split(upCSV)
+	downs := split(downCSV)
+	ag := split(attnGainCSV)
+	fg := split(ffnGainCSV)
+	n := len(qs)
+	if n == 0 || len(ks) != n || len(vs) != n || len(ups) != n || len(downs) != n {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: Q/K/V/Up/Down CSVs must share non-zero length")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: bad heads")
+	}
+	dKV := nKVHeads * dh
+	Kpasts, err := splitLayerKV(KpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := splitLayerKV(VpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("gqa_stack_trit: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews := make([][]float32, n)
+	Vnews := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		oName, aGain, fGain := "", "", ""
+		if i < len(os_) {
+			oName = os_[i]
+		}
+		if i < len(ag) {
+			aGain = ag[i]
+		}
+		if i < len(fg) {
+			fGain = fg[i]
+		}
+		next, kn, vn, e := s.forwardGQABlockTrit(
+			qs[i], ks[i], vs[i], oName, ups[i], downs[i], aGain, fGain,
+			cur, Kpasts[i], Vpasts[i], dim, hidden, nHeads, nKVHeads, dh, pos, base, bitplane, eps,
+		)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("gqa_stack_trit layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, flattenLayerKV(Knews), flattenLayerKV(Vnews), nil
+}
+
+func (s *weightSess) finalNorm(gainName string, x []float32, dim int, eps float64) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, fmt.Errorf("final_norm: bad dim")
+	}
+	gain, err := s.loadGain(gainName, dim)
+	if err != nil {
+		return nil, err
+	}
+	return rmsNormF32(x[:dim], eps, gain), nil
+}
+
 
 // --- v0.92 GQA packing ---
 func gqaExpandKV(kv []float32, nTok, nKVHeads, nHeads, dh int) ([]float32, error) {
@@ -11499,6 +11664,130 @@ func biWeightSessionAttnStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV
 		os.Exit(1)
 	}
 	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
+// --- v1.14 language bindings: forward_gqa_block_trit / gqa_stack_trit / final_norm ---
+
+func biWeightSessionForwardGQABlockTrit(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, vStr(""), vStr(""), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritG(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, vStr(""), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritGF(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritGFP(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritGFPB(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, base val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, base, vI32(0), vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritGFPBB(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, base, bp val) val {
+	return biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, base, bp, vF32(1e-6))
+}
+func biWeightSessionForwardGQABlockTritFull(id, qn, kn, vn, on, up, down, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGain, ffnGain, pos, base, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_gqa_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.forwardGQABlockTrit(
+		fmtVal(qn), fmtVal(kn), fmtVal(vn), fmtVal(on), fmtVal(up), fmtVal(down),
+		fmtVal(attnGain), fmtVal(ffnGain),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(nH), asI(nKV), asI(dh), asF(pos), asF(base), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_forward_gqa_block_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
+func biWeightSessionGQAStackTrit(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, vStr(""), vStr(""), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQAStackTritG(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, vStr(""), vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQAStackTritGF(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, vF32(0), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQAStackTritGFP(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQAStackTritGFPB(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, base val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, base, vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQAStackTritGFPBB(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, base, bp val) val {
+	return biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, base, bp, vF32(1e-6))
+}
+func biWeightSessionGQAStackTritFull(id, qCSV, kCSV, vCSV, oCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, base, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.gqaStackTritCSV(
+		fmtVal(qCSV), fmtVal(kCSV), fmtVal(vCSV), fmtVal(oCSV),
+		fmtVal(upCSV), fmtVal(downCSV), fmtVal(attnGainCSV), fmtVal(ffnGainCSV),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(nH), asI(nKV), asI(dh), asF(pos), asF(base), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_stack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
+func biWeightSessionFinalNorm(id, x, dimV val) val {
+	return biWeightSessionFinalNormFull(id, x, dimV, vStr(""), vF32(1e-6))
+}
+func biWeightSessionFinalNormG(id, x, dimV, gain val) val {
+	return biWeightSessionFinalNormFull(id, x, dimV, gain, vF32(1e-6))
+}
+func biWeightSessionFinalNormFull(id, x, dimV, gain, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_final_norm: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	y, err := s.finalNorm(fmtVal(gain), xf, asI(dimV), asF(epsV))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_final_norm: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(y)
 }
 
 func biWeightSessionLinearFused(id, name, x, Mv, Kv val) val {
@@ -14886,6 +15175,49 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritGFHPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
 		default:
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionAttnStackTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		}
+	case "weight_session_forward_gqa_block_trit":
+		switch len(args) {
+		case 15:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritGFP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		case 19:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritGFPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		case 20:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritGFPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionForwardGQABlockTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20])
+		}
+	case "weight_session_gqa_stack_trit":
+		switch len(args) {
+		case 15:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTrit(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritGFP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		case 19:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritGFPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		case 20:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritGFPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQAStackTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20])
+		}
+	case "weight_session_final_norm":
+		switch len(args) {
+		case 3:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionFinalNorm(%s, %s, %s)\n", tmp, args[0], args[1], args[2])
+		case 4:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionFinalNormG(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionFinalNormFull(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
 		}
 	case "load_gguf_window":
 		fmt.Fprintf(g.b, "\t%s := biLoadGgufWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])

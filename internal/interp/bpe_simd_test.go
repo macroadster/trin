@@ -288,3 +288,75 @@ func TestTinyGGUFDecodeStackTritDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionGQAStackTritDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/gqa_stack.gguf")); err != nil {
+		t.Skip("missing demos/weights/gqa_stack.gguf")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_gqa_stack_trit.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_gqa_stack_trit_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"decode_ok=1",
+		"stack_match=1",
+		"plane_ok=1",
+		"grow_ok=1",
+		"final_ok=1",
+		"flat_ok=1",
+		"prepack_built=12",
+		"prepack_hits2=12",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}
+
+func TestTinyGGUFDecodeGQATritDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_gqa.gguf")); err != nil {
+		t.Skip("missing demos/weights/tiny_gqa.gguf")
+	}
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_llm.vocab")); err != nil {
+		t.Skip("missing demos/weights/tiny_llm.vocab")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/tiny_gguf_decode_gqa_trit.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"tiny_gguf_decode_gqa_trit_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"decode_ok=1",
+		"parity_stack0_ok=1",
+		"grow_final_ok=1",
+		"plane_ok=1",
+		"final_ok=1",
+		"gen_text=FFF",
+		"prepack_built=13",
+		"prepack_hits2=13",
+		"final_kv_flat_len=16",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

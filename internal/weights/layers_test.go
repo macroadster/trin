@@ -519,3 +519,236 @@ func TestAttnStackTritParityAndGrow(t *testing.T) {
 		t.Fatal("bad dim")
 	}
 }
+
+func TestGQAStackTritParityAndFinalNorm(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gqa_stack.gguf")
+	// dim=4, nHeads=2, nKVHeads=1, dh=2, hidden=4, 2 layers
+	dim, hidden := 4, 4
+	nHeads, nKVHeads, dh := 2, 1, 2
+	dQ, dKV := nHeads*dh, nKVHeads*dh
+	// Q is dQ×dim = 4×4 (identity)
+	Q0 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	// K/V are dKV×dim = 2×4
+	K0 := []float32{
+		1, 0.1, 0, 0,
+		0, 1, 0.1, 0,
+	}
+	V0 := []float32{
+		0.8, 0, 0.1, 0,
+		0, 0.8, 0, 0.1,
+	}
+	O0 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	// Up hidden×dim = 4×4
+	Up0 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	// Down dim×hidden = 4×4
+	Down0 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	Q1 := []float32{
+		0.9, 0, 0, 0,
+		0, 0.9, 0, 0,
+		0, 0, 0.9, 0,
+		0, 0, 0, 0.9,
+	}
+	K1 := []float32{
+		1, 0, 0, 0.05,
+		0, 1, 0.05, 0,
+	}
+	V1 := []float32{
+		0.75, 0, 0.05, 0,
+		0, 0.75, 0, 0.05,
+	}
+	O1 := O0
+	Up1 := []float32{
+		0.5, 0, 0, 0,
+		0, 0.5, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0, 0.5,
+	}
+	Down1 := []float32{
+		0.5, 0, 0, 0,
+		0, 0.5, 0, 0,
+		0, 0, 0.5, 0,
+		0, 0, 0, 0.5,
+	}
+	g := []float32{1, 1, 1, 1}
+	tensors := map[string][]float32{
+		"L0_q": Q0, "L0_k": K0, "L0_v": V0, "L0_o": O0,
+		"L0_up": Up0, "L0_down": Down0, "L0_an": g, "L0_fn": g,
+		"L1_q": Q1, "L1_k": K1, "L1_v": V1, "L1_o": O1,
+		"L1_up": Up1, "L1_down": Down1, "L1_an": g, "L1_fn": g,
+		"final_norm": g,
+	}
+	shapes := map[string][]uint64{
+		"L0_q": {4, 4}, "L0_k": {2, 4}, "L0_v": {2, 4}, "L0_o": {4, 4},
+		"L0_up": {4, 4}, "L0_down": {4, 4}, "L0_an": {4}, "L0_fn": {4},
+		"L1_q": {4, 4}, "L1_k": {2, 4}, "L1_v": {2, 4}, "L1_o": {4, 4},
+		"L1_up": {4, 4}, "L1_down": {4, 4}, "L1_an": {4}, "L1_fn": {4},
+		"final_norm": {4},
+	}
+	if err := WriteGGUFF32(path, tensors, shapes, map[string]string{"general.name": "gqa-stack"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+
+	x := []float32{1.0, 0.5, -0.25, 0.75}
+	eps := 1e-6
+	// prepack: Q/O/Up K=dim; K/V K=dim; Down K=hidden
+	if _, _, err := s.PrepackTritCSV("L0_q,L0_k,L0_v,L0_o,L0_up,L1_q,L1_k,L1_v,L1_o,L1_up", dim); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PrepackTritCSV("L0_down,L1_down", hidden); err != nil {
+		t.Fatal(err)
+	}
+
+	manual := func(spec AttnLayerSpec, xin, kp, vp []float32, pos float64, bp bool) ([]float32, []float32, []float32) {
+		ag, err := s.loadGain(spec.AttnGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		xn := RMSNormF32(xin, eps, ag)
+		a, kn, vn, err := s.SessionAttnGQATrit(spec.Q, spec.K, spec.V, spec.O, xn, kp, vp, dim, nHeads, nKVHeads, dh, pos, 0, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			h[i] = xin[i] + a[i]
+		}
+		fg, err := s.loadGain(spec.FFNGain, dim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hn := RMSNormF32(h, eps, fg)
+		up, _, err := s.LinearTritCached(spec.Up, hn, hidden, dim, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		act := SiLUF32(up)
+		down, _, err := s.LinearTritCached(spec.Down, act, dim, hidden, bp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y := make([]float32, dim)
+		for i := 0; i < dim; i++ {
+			y[i] = h[i] + down[i]
+		}
+		return y, kn, vn
+	}
+	l0 := AttnLayerSpec{Q: "L0_q", K: "L0_k", V: "L0_v", O: "L0_o", AttnGain: "L0_an", FFNGain: "L0_fn", Up: "L0_up", Down: "L0_down", Hidden: hidden}
+	l1 := AttnLayerSpec{Q: "L1_q", K: "L1_k", V: "L1_v", O: "L1_o", AttnGain: "L1_an", FFNGain: "L1_fn", Up: "L1_up", Down: "L1_down", Hidden: hidden}
+
+	for _, bp := range []bool{false, true} {
+		y0m, k0, v0 := manual(l0, x, nil, nil, 0, bp)
+		y0, k0b, v0b, err := s.ForwardGQABlockTrit(l0, x, nil, nil, dim, nHeads, nKVHeads, dh, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y0m {
+			if !near(y0m[i], y0[i]) {
+				t.Fatalf("gqa block0 bp=%v i=%d %v vs %v", bp, i, y0m[i], y0[i])
+			}
+		}
+		if len(k0) != dKV || len(k0b) != dKV || len(v0) != dKV || len(v0b) != dKV {
+			t.Fatalf("compact kv0 lens %d %d %d %d want %d", len(k0), len(k0b), len(v0), len(v0b), dKV)
+		}
+		y1m, k1, _ := manual(l1, y0m, nil, nil, 0, bp)
+		ys, kns, vns, err := s.GQAStackTrit([]AttnLayerSpec{l0, l1}, x, nil, nil, dim, nHeads, nKVHeads, dh, 0, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range y1m {
+			if !near(y1m[i], ys[i]) {
+				t.Fatalf("gqa stack bp=%v i=%d %v vs %v", bp, i, y1m[i], ys[i])
+			}
+		}
+		if len(kns) != 2 || len(vns) != 2 {
+			t.Fatalf("gqa stack kv parts")
+		}
+		if len(kns[0]) != dKV || len(kns[1]) != dKV {
+			t.Fatalf("gqa stack kv sizes %d %d", len(kns[0]), len(kns[1]))
+		}
+		// grow past
+		_, kns2, _, err := s.GQAStackTrit([]AttnLayerSpec{l0, l1}, x, kns, vns, dim, nHeads, nKVHeads, dh, 1, 0, bp, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(kns2[0]) != 2*dKV || len(kns2[1]) != 2*dKV {
+			t.Fatalf("gqa grow want 2 toks/layer got %d %d", len(kns2[0])/dKV, len(kns2[1])/dKV)
+		}
+		// CSV surface
+		yCSV, kFlat, vFlat, err := s.GQAStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_up,L1_up", "L0_down,L1_down", "L0_an,L1_an", "L0_fn,L1_fn",
+			x, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ys {
+			if !near(ys[i], yCSV[i]) {
+				t.Fatalf("gqa csv y bp=%v i=%d", bp, i)
+			}
+		}
+		if len(kFlat) != 2*dKV || len(vFlat) != 2*dKV {
+			t.Fatalf("gqa flat kv len %d %d", len(kFlat), len(vFlat))
+		}
+		_, kFlat2, _, err := s.GQAStackTritCSV(
+			"L0_q,L1_q", "L0_k,L1_k", "L0_v,L1_v", "L0_o,L1_o",
+			"L0_up,L1_up", "L0_down,L1_down", "L0_an,L1_an", "L0_fn,L1_fn",
+			x, kFlat, vFlat, dim, hidden, nHeads, nKVHeads, dh, 1, 0, bp, eps,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(kFlat2) != 4*dKV {
+			t.Fatalf("gqa flat grow want %d got %d", 4*dKV, len(kFlat2))
+		}
+		// final norm
+		yn, err := s.FinalNorm("final_norm", ys, dim, eps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := RMSNormF32(ys, eps, g)
+		for i := range ref {
+			if !near(ref[i], yn[i]) {
+				t.Fatalf("final_norm bp=%v i=%d", bp, i)
+			}
+		}
+		_ = k1
+		_ = dQ
+	}
+
+	if !s.HasTritPack("L0_q") || !s.HasTritPack("L1_down") {
+		t.Fatal("gqa packs dropped")
+	}
+	if _, _, _, err := s.GQAStackTritCSV("", "", "", "", "", "", "", "", x, nil, nil, dim, hidden, nHeads, nKVHeads, dh, 0, 0, true, eps); err == nil {
+		t.Fatal("empty layers")
+	}
+	if _, _, _, err := s.GQAStackTritCSV("L0_q", "L0_k", "L0_v", "L0_o", "L0_up", "L0_down", "", "", x, nil, nil, dim, hidden, 3, 2, dh, 0, 0, true, eps); err == nil {
+		t.Fatal("bad head ratio")
+	}
+}
