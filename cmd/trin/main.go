@@ -37,7 +37,7 @@ func main() {
 		}
 	case "build":
 		if len(os.Args) < 3 {
-			fatal("usage: trin build <file.trin> [-o out] [--backend go|c|llvm] [--emit-obj] [--link-llvm]")
+			fatal("usage: trin build <file.trin> [-o out] [--backend go|c|cuda|llvm] [--emit-obj] [--link-llvm]")
 		}
 		in := os.Args[2]
 		out := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
@@ -103,6 +103,8 @@ func main() {
 		emitIR(os.Args[2:], "c")
 	case "emit-go":
 		emitIR(os.Args[2:], "go")
+	case "emit-cuda":
+		emitIR(os.Args[2:], "cuda")
 	case "emit-ir":
 		emitTrinIR(os.Args[2:])
 	case "emit-llvm":
@@ -164,6 +166,8 @@ func emitIR(args []string, kind string) {
 		code, err = codegen.EmitC(prog)
 	case "go":
 		code, err = codegen.EmitGo(prog)
+	case "cuda":
+		code, err = codegen.EmitCUDA(prog)
 	}
 	if err != nil {
 		fatal(err.Error())
@@ -426,8 +430,10 @@ func build(in, out, backend string) error {
 		return buildGo(prog, out)
 	case "c", "cc":
 		return buildC(prog, out)
+	case "cuda":
+		return buildCUDA(prog, out)
 	default:
-		return fmt.Errorf("unknown backend %q (want go or c)", backend)
+		return fmt.Errorf("unknown backend %q (want go, c, or cuda)", backend)
 	}
 }
 
@@ -552,6 +558,31 @@ func buildC(prog *ast.Program, out string) error {
 		return fmt.Errorf("C compile failed (%s): %w — generated source left at %s", cc, err, tmp)
 	}
 	if os.Getenv("TRIN_KEEP_C") != "1" {
+		_ = os.Remove(tmp)
+	}
+	return nil
+}
+
+func buildCUDA(prog *ast.Program, out string) error {
+	cu, err := codegen.EmitCUDA(prog)
+	if err != nil {
+		return err
+	}
+	tmp := out + ".trin.cu"
+	if err := os.WriteFile(tmp, []byte(cu), 0o644); err != nil {
+		return err
+	}
+	nvcc := os.Getenv("TRIN_NVCC")
+	if nvcc == "" {
+		nvcc = "nvcc"
+	}
+	cmd := exec.Command(nvcc, "-O2", "-o", out, tmp)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nvcc compile failed (%s): %w — generated source left at %s", nvcc, err, tmp)
+	}
+	if os.Getenv("TRIN_KEEP_CUDA") != "1" {
 		_ = os.Remove(tmp)
 	}
 	return nil
@@ -814,11 +845,12 @@ func usage() {
 
 Usage:
   trin run <file.trin>                      interpret
-  trin build <file.trin> [-o x] [--backend go|c|llvm]
+  trin build <file.trin> [-o x] [--backend go|c|cuda|llvm]
                                             compile to native binary
   trin build <file.trin> --link-llvm [-o x] same as --backend llvm
   trin emit-go <file.trin> [-o x]           emit Go only
   trin emit-c <file.trin> [-o x]            emit C only
+  trin emit-cuda <file.trin> [-o x]         emit CUDA C (.cu) only
   trin emit-ir <file.trin> [-o x]           emit TrinIR text
   trin emit-llvm <file.trin> [-o x]         emit LLVM IR text
   trin emit-mlir <file.trin> [-o x]         emit MLIR dialect / vector IR text
@@ -836,12 +868,14 @@ Default build backend: go (when go is on PATH), else c.
 Override with --backend or TRIN_BACKEND.
 
 Env:
-  TRIN_BACKEND     go|c|llvm (default: auto go/c)
+  TRIN_BACKEND     go|c|cuda|llvm (default: auto go/c)
   TRIN_CC          C compiler (backend=c / llvm link; default: cc)
+  TRIN_NVCC        CUDA compiler (backend=cuda; default: nvcc)
   TRIN_LLC         path to llc (emit-obj / link-llvm)
   TRIN_LLVM_ENTRY  float kernel symbol for host driver (default: auto)
   TRIN_KEEP_C      keep intermediate .c if 1
   TRIN_KEEP_GO     keep intermediate go workspace if 1
+  TRIN_KEEP_CUDA   keep intermediate .cu if 1
   TRIN_KEEP_LLVM   keep llc/host intermediates if 1
   TRIN_GO          go binary (default: go)
 `, version)

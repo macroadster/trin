@@ -54,11 +54,26 @@ No new control combinators — only desugar onto `gate \| pure \| each` + `map`.
 | MXFP4  | 39 | 32 / 17 B | E8M0 e + 16 nibble E2M1 qs |
 | NVFP4  | 40 | 64 / 36 B | 4×UE4M3 scales + 32 nibble E2M1 qs |
 
-Still unsupported (clear error): CUDA.
+Still unsupported (clear error for IQ/TQ types not listed above).
+
+## CUDA backend (v1.02)
+
+GPU-accelerated code generation via `emit-cuda` / `--backend cuda`. Emits
+standalone `.cu` files with `__global__` kernels for:
+
+- **Elementwise**: `silu`, `gelu`, `span_add`, `span_scale`, `span_mul`
+- **Reductions**: `sum`, `dot` (shared-memory tree)
+- **Normalization**: `rmsnorm` (two-pass), `softmax` (three-pass)
+- **Rotation**: `rope` (pairwise parallel)
+- **Linear**: `linear_trit` (one thread per output row)
+- **Attention**: `attn_scores` (one thread per query-key pair)
+
+CPU-only: I/O, weight loading, sampling, KV cache, trit packing, argmax.
+
+Requires `nvcc` on PATH (or `TRIN_NVCC`). No external library needed.
 
 ## Limits
-
-- CUDA out of scope.
+- CUDA backend is correctness-first; competitive tok/s and multi-GPU are follow-ons.
 - Go-backend ternary still evaluates both arms then soft-selects (side-effect
   short-circuit only in interpreter hard paths).
 

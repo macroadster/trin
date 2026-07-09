@@ -36,9 +36,10 @@ CLI:
 
 ```
 trin run <file.trin>                         # interpreter
-trin build <file.trin> [-o x] [--backend go|c]
+trin build <file.trin> [-o x] [--backend go|c|cuda]
 trin emit-go <file.trin>                     # Go only
 trin emit-c <file.trin>                      # C only
+trin emit-cuda <file.trin>                   # CUDA C (.cu) only
 trin emit-ir <file.trin>                     # TrinIR text
 trin emit-llvm <file.trin>                   # LLVM IR text
 trin emit-obj <file.trin> [-o x.o]           # LLVM IR → object via llc (when present)
@@ -47,8 +48,9 @@ trin build <file.trin> --backend llvm -o x   # same full link path
 trin version
 ```
 
-Env: `TRIN_BACKEND` (go|c|llvm), `TRIN_CC`, `TRIN_KEEP_C=1`, `TRIN_KEEP_GO=1`,
-`TRIN_KEEP_LLVM=1`, `TRIN_GO`, `TRIN_LLC`, `TRIN_LLVM_ENTRY`.
+Env: `TRIN_BACKEND` (go|c|cuda|llvm), `TRIN_CC`, `TRIN_NVCC`, `TRIN_KEEP_C=1`,
+`TRIN_KEEP_GO=1`, `TRIN_KEEP_CUDA=1`, `TRIN_KEEP_LLVM=1`, `TRIN_GO`, `TRIN_LLC`,
+`TRIN_LLVM_ENTRY`.
 
 Soft-mux / span AD surface (v0.6–0.18):
 
@@ -77,6 +79,38 @@ filter((x)=>pred, xs)                        # hard keep where pred!=0 (v0.15)
 grad_expr(... sum(filter(...)) ...)          # filter reverse AD, keep-set frozen (v0.15)
                                              # bodies: scalar + - * / soft_mux vars/lits
 ```
+
+## CUDA backend (v1.02)
+
+The CUDA backend emits standalone `.cu` files with GPU-accelerated kernels for
+compute-heavy operations. Compile with `nvcc`:
+
+```bash
+./trin emit-cuda examples/llm_kernels.trin -o llm_kernels.cu
+nvcc -O2 -o llm_kernels llm_kernels.cu
+./llm_kernels
+
+# or in one step:
+./trin build examples/llm_kernels.trin -o build/llm_kernels --backend cuda
+```
+
+GPU-accelerated operations (via CUDA `__global__` kernels):
+
+| Kernel | Strategy |
+|--------|----------|
+| `silu` / `gelu` | Elementwise (one thread per element) |
+| `softmax` | Three-pass: max reduction → exp-sum → normalize |
+| `rmsnorm` | Two-pass: sum-of-squares reduction → scale |
+| `rope` | Pairwise parallel rotation |
+| `sum` / `dot` | Shared-memory tree reduction |
+| `span_add` / `span_scale` / `span_mul` | Elementwise |
+| `linear_trit` | One thread per output row (GEMV) |
+| `attn_scores` | One thread per query-key pair |
+
+CPU-only operations: I/O (`print`, `input`), weight loading (`load_*`),
+sampling (`sample_*`), KV cache (`kv_*`), trit packing, argmax.
+
+Each generated `.cu` is fully self-contained — no external Trin library needed.
 
 C backend notes: host `cc` optional; general unary `map`, n-ary `zip_with`,
 `reduce`/`fold`/`scan`/`filter` match Go (element / multi-span / fold loops +
@@ -331,7 +365,7 @@ growing KV via `kv_append`.
 |---|---|
 | Deterministic interpret == Go-backend native for LLM builtins | C backend incomplete for new I/O on some hosts |
 | Loop/for sugar: `when`/`over`/`for-in` + `range` desugar to ternary/map | Go ternary evaluates both arms before soft-select |
-| Absmean quantize + scaled trit Linear match bitplane GEMM math | CUDA still unsupported |
+| Absmean quantize + scaled trit Linear match bitplane GEMM math | CUDA backend requires `nvcc` on PATH (or `TRIN_NVCC`) |
 | GGUF v2/v3 LE + common block quants + **IQ1 (S/M) + IQ2 family + IQ3 (XXS/S) + IQ4_NL/XS** + **TQ1_0/TQ2_0** + **MXFP4/NVFP4** + **multi-shard** → f32 | Network fetch out of scope |
 | mmap (syscall) open for GGUF + safetensors; multi-shard auto-walk via sessions | Dequant still allocates the f32 output span |
 | Retained weight sessions: multi-tensor load without re-open | Sessions are process-local int32 handles |
@@ -344,7 +378,7 @@ growing KV via `kv_append`.
 | Attention + multi-head (`mha`) + RoPE + RMSNorm + SiLU block composable | `gqa_expand_kv` / `weight_session_gqa` for GQA |
 | Greedy / argmax / seeded categorical & top-k sampling (LCG) | Hardware CSPRNG not used — intentional for reproducible demos |
 | KV cache as row-major span + append/len/row helpers | Not a distinct GC'd tensor type; user owns layout |
-| Additive API — no bulk renames of pre-0.81 symbols | Competitive CUDA tok/s is out of scope |
+| Additive API — no bulk renames of pre-0.81 symbols | CUDA backend correctness-first; competitive tok/s is a follow-on |
 
 ### Acceptance (v1.01)
 
@@ -352,8 +386,9 @@ growing KV via `kv_append`.
 - `bash scripts/e2e_native.sh` green including `loop_sugar`
 - `./trin build examples/loop_sugar.trin` shows `loop_sugar_ok=1`
 
+| 1.02 | **CUDA backend**: `emit-cuda` / `--backend cuda` — GPU-accelerated LLM kernels (silu, gelu, softmax, rmsnorm, rope, sum, dot, span_add, span_scale, span_mul, linear_trit, attn_scores); standalone `.cu` compilation via `nvcc` |
+
 ## Next
 
-- v1.01 production baseline: + loop/for surface sugar (`when`/`over`/`for-in`/`range`)
-- Follow-ons: CUDA
+- Follow-ons: multi-GPU, CUDA graph fusion, device-resident KV cache
 
