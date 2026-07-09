@@ -98,6 +98,8 @@ func TestLinearTritBenchPaths(t *testing.T) {
 	// warmup
 	_ = LinearTritScalar(W, x, M, K, scale)
 	_ = LinearTritPlanes(W, x, M, K, scale)
+	pos, neg, nw := PackTritMatrix(W, M, K)
+	_ = LinearTritPlanesPacked(pos, neg, x, M, K, nw, scale)
 	const iters = 40
 	t0 := time.Now()
 	var sink float32
@@ -112,11 +114,90 @@ func TestLinearTritBenchPaths(t *testing.T) {
 		sink += y[0]
 	}
 	sPlane := time.Since(t0)
+	t0 = time.Now()
+	for i := 0; i < iters; i++ {
+		y := LinearTritPlanesPacked(pos, neg, x, M, K, nw, scale)
+		sink += y[0]
+	}
+	sPacked := time.Since(t0)
 	// force sink use
 	if sink == 1e30 {
 		t.Fatal("unreachable")
 	}
-	t.Logf("linear_trit_bench M=%d K=%d iters=%d scalar=%s planes=%s ratio=%.3f", M, K, iters, sScalar, sPlane, float64(sScalar)/float64(sPlane))
+	t.Logf("linear_trit_bench M=%d K=%d iters=%d scalar=%s planes=%s packed=%s ratio_scalar/packed=%.3f ratio_planes/packed=%.3f",
+		M, K, iters, sScalar, sPlane, sPacked, float64(sScalar)/float64(sPacked), float64(sPlane)/float64(sPacked))
+}
+
+func TestLinearTritPrepackCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.gguf")
+	M, K := 8, 128
+	vals := make([]float32, M*K)
+	pat := []float32{1.1, 0, -0.8, 0.3, -1.2, 0.05, 0.7, -0.4}
+	for i := range vals {
+		vals[i] = pat[i%len(pat)]
+	}
+	if err := WriteGGUFF32(path, map[string][]float32{"weight": vals},
+		map[string][]uint64{"weight": {uint64(M), uint64(K)}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+	if s.HasTritPack("weight") {
+		t.Fatal("expected empty cache")
+	}
+	built, err := s.PrepackTrit("weight", K)
+	if err != nil || !built {
+		t.Fatalf("first prepack built=%v err=%v", built, err)
+	}
+	built2, err := s.PrepackTrit("weight", K)
+	if err != nil || built2 {
+		t.Fatalf("second prepack hit expected built=false got %v %v", built2, err)
+	}
+	if !s.HasTritPack("weight") {
+		t.Fatal("expected pack present")
+	}
+	pm, pk, sc, ok := s.TritPackInfo("weight")
+	if !ok || pm != M || pk != K || sc <= 0 {
+		t.Fatalf("info M=%d K=%d sc=%v ok=%v", pm, pk, sc, ok)
+	}
+	x := make([]float32, K)
+	for i := range x {
+		x[i] = 0.07 * float32(i%5-2)
+	}
+	// uncached full-tile path vs cached scalar/planes
+	ref, scRef, err := s.LinearTrit("weight", x, M, K, M, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ys, scs, err := s.LinearTritCached("weight", x, M, K, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yp, scp, err := s.LinearTritCached("weight", x, M, K, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(float64(scRef-scs)) > 1e-6 || math.Abs(float64(scs-scp)) > 1e-6 {
+		t.Fatalf("scale ref=%v s=%v p=%v", scRef, scs, scp)
+	}
+	for i := 0; i < M; i++ {
+		if math.Abs(float64(ref[i]-ys[i])) > 1e-4 || math.Abs(float64(ys[i]-yp[i])) > 1e-4 {
+			t.Fatalf("row %d ref=%v ys=%v yp=%v", i, ref[i], ys[i], yp[i])
+		}
+	}
+	// Drop and re-prepack
+	s.DropTritPack("weight")
+	if s.HasTritPack("weight") {
+		t.Fatal("drop failed")
+	}
+	built3, err := s.PrepackTrit("weight", K)
+	if err != nil || !built3 {
+		t.Fatalf("rebuild %v %v", built3, err)
+	}
 }
 
 func TestLinearRowsF32(t *testing.T) {

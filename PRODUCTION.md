@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.06.0-go  
+**Version:** 1.07.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07).
 
 ## What is production-ready
 
@@ -23,7 +23,8 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 22. **Tokenizer + GGUF decode (v1.04)** — `open_vocab` / `vocab_encode` / `vocab_decode` / `load_text` + multi-tensor `tiny_llm.gguf` session greedy decode with KV
 23. **SIMD trit matvec + BPE sidecar (v1.05)** — packed set-bit `linear_trit` bitplane path + `open_bpe` / `bpe_encode` local merges
 24. **Session packed trit linear (v1.06)** — `weight_session_linear_trit` / `_tile` / `load_gguf_linear_trit`: GGUF/safetensors row tiles → absmean trit → scalar or bitplane matvec; microbench scripts report both paths
-25–27. Linear trit, transformer cores, KV/sample, toolchain, verification
+25. **Session trit prepack cache (v1.07)** — `weight_session_prepack_trit` / `weight_session_linear_trit_cached`: whole-tensor absmean + packed planes retained on the session; hit path skips re-quant/re-pack
+26–28. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -138,6 +139,19 @@ Demos: `weight_session_linear_trit.trin`, `linear_trit_bench.trin`.
 Bench: `scripts/bench_session_linear_trit.sh` (unit path + native wall time).
 Note: per-tile absmean scale is independent when `tileRows < M`; compare free-span full-tensor quant only with `tileRows=M`.
 
+## Session trit prepack cache (v1.07)
+
+| Builtin / API | Role |
+|---|---|
+| `weight_session_prepack_trit(id,name,K)` | build absmean trit + pos/neg planes once; returns `1` built / `0` hit |
+| `weight_session_has_trit_pack(id,name)` | `1` if pack retained |
+| `weight_session_trit_pack_info(id,name)` | `[M,K,scale,hit]` |
+| `weight_session_drop_trit_pack(id,name)` | drop one pack |
+| `weight_session_linear_trit_cached(id,name,x,M,K [,bitplane])` | matvec from pack (auto-prepack); returns `[y,scale]` |
+
+Demo: `examples/weight_session_trit_cache.trin` (`cache_hit_ok=1`, `parity_ok=1`).
+Cache cleared on `close_weight_session`. Full-tensor scale matches `weight_session_linear_trit(..., tileRows=M)`.
+
 ## Limits
 
 - CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
@@ -168,6 +182,9 @@ Note: per-tile absmean scale is independent when `tileRows < M`; compare free-sp
 - [x] Session `weight_session_linear_trit` + tile/oneshot
 - [x] Microbench scalar vs planes + session demo
 - [x] Version `1.06.0-go`
+- [x] Session trit prepack cache + cached matvec
+- [x] Demo `weight_session_trit_cache` (hit + parity)
+- [x] Version `1.07.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -186,6 +203,7 @@ go run scripts/gen_tiny_llm_gguf.go .
 go run scripts/gen_trit_session_fixture.go .
 ./trin run examples/weight_session_linear_trit.trin
 ./trin run examples/linear_trit_bench.trin
+./trin run examples/weight_session_trit_cache.trin
 bash scripts/bench_session_linear_trit.sh
 bash scripts/e2e_native.sh
 ```

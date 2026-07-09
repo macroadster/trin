@@ -1,0 +1,88 @@
+// v1.07 — session trit prepack cache: build once, hit twice, matvec parity
+// Fixture: demos/weights/trit_session.gguf (M=32 K=256)
+
+fn make_x() {
+    let p = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75
+    ];
+    let r1 = span_concat(p, p);
+    let r2 = span_concat(r1, r1);
+    let full = span_concat(r2, r2);
+    full
+}
+
+fn main() {
+    let M = 32;
+    let K = 256;
+    let x = make_x();
+    let sid = open_weight_session("demos/weights/trit_session.gguf");
+
+    let has0 = weight_session_has_trit_pack(sid, "weight");
+    println(str_concat("has_before=", to_str(has0)));
+
+    // first prepack → build
+    let b1 = weight_session_prepack_trit(sid, "weight", K);
+    // second prepack → cache hit
+    let b2 = weight_session_prepack_trit(sid, "weight", K);
+    println(str_concat("built1=", to_str(b1)));
+    println(str_concat("built2=", to_str(b2)));
+    let has1 = weight_session_has_trit_pack(sid, "weight");
+    println(str_concat("has_after=", to_str(has1)));
+
+    let info = weight_session_trit_pack_info(sid, "weight");
+    println(str_concat("info_M=", to_str(info[0])));
+    println(str_concat("info_K=", to_str(info[1])));
+    println(str_concat("info_scale=", to_str(info[2])));
+    println(str_concat("info_hit=", to_str(info[3])));
+
+    // uncached full-tile (tileRows=M) vs cached scalar vs cached packed
+    let ru = weight_session_linear_trit(sid, "weight", x, M, K, M, 0);
+    let yu = ru[0];
+    let su = ru[1];
+    let rc0 = weight_session_linear_trit_cached(sid, "weight", x, M, K, 0);
+    let yc0 = rc0[0];
+    let sc0 = rc0[1];
+    let rc1 = weight_session_linear_trit_cached(sid, "weight", x, M, K, 1);
+    let yc1 = rc1[0];
+    let sc1 = rc1[1];
+
+    let d0 = yu[0] - yc0[0];
+    let a0 = (d0 < 0.0) | (0.0 - d0) | d0;
+    let d1 = yc0[0] - yc1[0];
+    let a1 = (d1 < 0.0) | (0.0 - d1) | d1;
+    let d2 = yu[31] - yc1[31];
+    let a2 = (d2 < 0.0) | (0.0 - d2) | d2;
+    let ds = su - sc1;
+    let ads = (ds < 0.0) | (0.0 - ds) | ds;
+    println(str_concat("parity_uncached_scalar=", to_str(a0 < 0.0001)));
+    println(str_concat("parity_scalar_planes=", to_str(a1 < 0.0001)));
+    println(str_concat("parity_last=", to_str(a2 < 0.0001)));
+    println(str_concat("parity_scale=", to_str(ads < 0.0001)));
+    println(str_concat("y0=", to_str(yu[0])));
+    println(str_concat("yc1_0=", to_str(yc1[0])));
+
+    // drop then miss, then rebuild
+    weight_session_drop_trit_pack(sid, "weight");
+    let has2 = weight_session_has_trit_pack(sid, "weight");
+    let b3 = weight_session_prepack_trit(sid, "weight", K);
+    println(str_concat("has_after_drop=", to_str(has2)));
+    println(str_concat("built3=", to_str(b3)));
+
+    // repeated cached matvec (hit path) still consistent
+    let r2 = weight_session_linear_trit_cached(sid, "weight", x, M, K, 1);
+    let d3 = r2[0][0] - yc1[0];
+    let a3 = (d3 < 0.0) | (0.0 - d3) | d3;
+    println(str_concat("repeat_parity=", to_str(a3 < 0.0001)));
+
+    let hit_ok = (b1 == 1) * (b2 == 0) * (has0 == 0) * (has1 == 1) * (has2 == 0) * (b3 == 1) * (info[3] == 1);
+    let parity_ok = (a0 < 0.0001) * (a1 < 0.0001) * (a2 < 0.0001) * (ads < 0.0001) * (a3 < 0.0001);
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+    println(str_concat("weight_session_trit_cache_ok=", to_str(hit_ok * parity_ok)));
+    println("weight_session_trit_cache_ok");
+
+    close_weight_session(sid);
+}

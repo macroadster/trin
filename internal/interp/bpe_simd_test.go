@@ -91,3 +91,31 @@ func TestLinearTritBenchDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionTritCacheDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/trit_session.gguf")); err != nil {
+		t.Skip("missing demos/weights/trit_session.gguf")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_trit_cache.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_trit_cache_ok",
+		"cache_hit_ok=1",
+		"parity_ok=1",
+		"built1=1",
+		"built2=0",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

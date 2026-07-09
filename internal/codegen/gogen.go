@@ -9168,6 +9168,19 @@ type weightSess struct {
 	Mapped bool
 	gguf   *ggufFile
 	st     *stFile
+	// trit prepack cache (v1.07)
+	tritMu   sync.Mutex
+	tritPack map[string]*tritPack
+}
+type tritPack struct {
+	Name  string
+	M     int
+	K     int
+	Scale float32
+	W     []int8
+	Pos   []uint32
+	Neg   []uint32
+	NW    int
 }
 
 func openWeightSession(path string) (*weightSess, error) {
@@ -9230,6 +9243,11 @@ func closeWeightSession(id int32) error {
 	sessMu.Unlock()
 	if !ok || s == nil {
 		return nil
+	}
+	if s != nil {
+		s.tritMu.Lock()
+		s.tritPack = nil
+		s.tritMu.Unlock()
 	}
 	var err error
 	if s.gguf != nil {
@@ -10185,6 +10203,163 @@ func linearTritPlanesF32(W []int8, x []float32, M, K int, scale float32) []float
 	return out
 }
 
+func packTritMatrixF32(W []int8, M, K int) (pos, neg []uint32, nw int) {
+	if M <= 0 || K <= 0 {
+		return []uint32{}, []uint32{}, 0
+	}
+	nw = (K + 31) / 32
+	pos = make([]uint32, M*nw)
+	neg = make([]uint32, M*nw)
+	for i := 0; i < M; i++ {
+		rp, rn := packInt8WordsF32(W[i*K : i*K+K])
+		copy(pos[i*nw:(i+1)*nw], rp)
+		copy(neg[i*nw:(i+1)*nw], rn)
+	}
+	return pos, neg, nw
+}
+
+func linearTritPlanesPackedF32(pos, neg []uint32, x []float32, M, K, nw int, scale float32) []float32 {
+	out := make([]float32, M)
+	if M <= 0 || K <= 0 || nw <= 0 {
+		return out
+	}
+	for i := 0; i < M; i++ {
+		off := i * nw
+		end := off + nw
+		if end > len(pos) || end > len(neg) {
+			break
+		}
+		acc := mixedDotPlanesF32(pos[off:end], neg[off:end], x, K, nw)
+		out[i] = scale * float32(acc)
+	}
+	return out
+}
+
+func (s *weightSess) prepackTrit(name string, K int) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("nil session")
+	}
+	if K <= 0 {
+		return false, fmt.Errorf("prepack_trit: bad K")
+	}
+	s.tritMu.Lock()
+	if s.tritPack != nil {
+		if p := s.tritPack[name]; p != nil && p.K == K {
+			s.tritMu.Unlock()
+			return false, nil
+		}
+	}
+	s.tritMu.Unlock()
+	sh, err := s.shape(name)
+	if err != nil {
+		return false, err
+	}
+	nElem := 1
+	for _, d := range sh {
+		if d <= 0 {
+			return false, fmt.Errorf("zero dim")
+		}
+		nElem *= int(d)
+	}
+	if nElem%K != 0 {
+		return false, fmt.Errorf("prepack_trit: nElem not divisible by K")
+	}
+	M := nElem / K
+	wF, err := s.loadF32Window(name, 0, M*K)
+	if err != nil {
+		return false, err
+	}
+	W, scale := quantizeAbsMeanTritsF32(wF)
+	pos, neg, nw := packTritMatrixF32(W, M, K)
+	pack := &tritPack{Name: name, M: M, K: K, Scale: scale, W: W, Pos: pos, Neg: neg, NW: nw}
+	s.tritMu.Lock()
+	if s.tritPack == nil {
+		s.tritPack = map[string]*tritPack{}
+	}
+	if existing := s.tritPack[name]; existing != nil && existing.K == K {
+		s.tritMu.Unlock()
+		return false, nil
+	}
+	s.tritPack[name] = pack
+	s.tritMu.Unlock()
+	return true, nil
+}
+
+func (s *weightSess) hasTritPack(name string) bool {
+	if s == nil {
+		return false
+	}
+	s.tritMu.Lock()
+	defer s.tritMu.Unlock()
+	if s.tritPack == nil {
+		return false
+	}
+	return s.tritPack[name] != nil
+}
+
+func (s *weightSess) tritPackInfo(name string) (M, K int, scale float32, ok bool) {
+	if s == nil {
+		return 0, 0, 0, false
+	}
+	s.tritMu.Lock()
+	defer s.tritMu.Unlock()
+	if s.tritPack == nil {
+		return 0, 0, 0, false
+	}
+	p := s.tritPack[name]
+	if p == nil {
+		return 0, 0, 0, false
+	}
+	return p.M, p.K, p.Scale, true
+}
+
+func (s *weightSess) dropTritPack(name string) {
+	if s == nil {
+		return
+	}
+	s.tritMu.Lock()
+	if s.tritPack != nil {
+		delete(s.tritPack, name)
+	}
+	s.tritMu.Unlock()
+}
+
+func (s *weightSess) linearTritCached(name string, x []float32, M, K int, bitplane bool) ([]float32, float32, error) {
+	if s == nil {
+		return nil, 0, fmt.Errorf("nil session")
+	}
+	if M <= 0 || K <= 0 {
+		return nil, 0, fmt.Errorf("linear_trit_cached: bad M/K")
+	}
+	if len(x) < K {
+		return nil, 0, fmt.Errorf("linear_trit_cached: x short")
+	}
+	if _, err := s.prepackTrit(name, K); err != nil {
+		return nil, 0, err
+	}
+	s.tritMu.Lock()
+	p := s.tritPack[name]
+	s.tritMu.Unlock()
+	if p == nil {
+		return nil, 0, fmt.Errorf("linear_trit_cached: pack missing")
+	}
+	if M > p.M {
+		return nil, 0, fmt.Errorf("linear_trit_cached: M too large")
+	}
+	if K != p.K {
+		return nil, 0, fmt.Errorf("linear_trit_cached: K mismatch")
+	}
+	scale := p.Scale
+	var y []float32
+	if bitplane {
+		nw := p.NW
+		y = linearTritPlanesPackedF32(p.Pos[:M*nw], p.Neg[:M*nw], x[:K], M, K, nw, scale)
+	} else {
+		y = linearTritScalarF32(p.W[:M*K], x[:K], M, K, scale)
+	}
+	return y, scale, nil
+}
+
 func (s *weightSess) linearTritRows(name string, x []float32, K, row0, nRows int, bitplane bool) ([]float32, float32, error) {
 	if s == nil {
 		return nil, 0, fmt.Errorf("nil session")
@@ -10714,6 +10889,76 @@ func biLoadGgufLinearTritFull(path, name, x, Mv, Kv, tileV, flag val) val {
 	ys, sc, err := linearTritGGUF(fmtVal(path), fmtVal(name), xf, asI(Mv), asI(Kv), asI(tileV), use)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load_gguf_linear_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(ys), vF32(float64(sc))})
+}
+func biWeightSessionPrepackTrit(id, name, Kv val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_prepack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	built, err := s.prepackTrit(fmtVal(name), asI(Kv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_prepack_trit: %v\n", err)
+		os.Exit(1)
+	}
+	if built {
+		return vI32(1)
+	}
+	return vI32(0)
+}
+func biWeightSessionHasTritPack(id, name val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_has_trit_pack: %v\n", err)
+		os.Exit(1)
+	}
+	if s.hasTritPack(fmtVal(name)) {
+		return vI32(1)
+	}
+	return vI32(0)
+}
+func biWeightSessionTritPackInfo(id, name val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_trit_pack_info: %v\n", err)
+		os.Exit(1)
+	}
+	M, K, sc, ok := s.tritPackInfo(fmtVal(name))
+	hit := 0
+	if ok {
+		hit = 1
+	}
+	return vSpan([]val{vI32(M), vI32(K), vF32(float64(sc)), vI32(hit)})
+}
+func biWeightSessionDropTritPack(id, name val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_drop_trit_pack: %v\n", err)
+		os.Exit(1)
+	}
+	s.dropTritPack(fmtVal(name))
+	return vVoid()
+}
+func biWeightSessionLinearTritCached(id, name, x, Mv, Kv val) val {
+	return biWeightSessionLinearTritCachedFlag(id, name, x, Mv, Kv, vI32(0))
+}
+func biWeightSessionLinearTritCachedFlag(id, name, x, Mv, Kv, flag val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit_cached: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	use := asF(flag) != 0 || asI(flag) != 0
+	ys, sc, err := s.linearTritCached(fmtVal(name), xf, asI(Mv), asI(Kv), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_linear_trit_cached: %v\n", err)
 		os.Exit(1)
 	}
 	return vSpan([]val{f32sToSpan(ys), vF32(float64(sc))})
@@ -13644,6 +13889,20 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTritTile(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
 		} else {
 			fmt.Fprintf(g.b, "\t%s := biLoadGgufLinearTrit(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		}
+	case "weight_session_prepack_trit":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionPrepackTrit(%s, %s, %s)\n", tmp, args[0], args[1], args[2])
+	case "weight_session_has_trit_pack":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionHasTritPack(%s, %s)\n", tmp, args[0], args[1])
+	case "weight_session_trit_pack_info":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionTritPackInfo(%s, %s)\n", tmp, args[0], args[1])
+	case "weight_session_drop_trit_pack":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionDropTritPack(%s, %s)\n", tmp, args[0], args[1])
+	case "weight_session_linear_trit_cached":
+		if len(args) >= 6 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritCachedFlag(%s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLinearTritCached(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
 		}
 	case "load_gguf_linear":
 		if len(args) >= 6 {

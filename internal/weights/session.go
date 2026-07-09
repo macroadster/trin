@@ -16,6 +16,24 @@ type WeightSession struct {
 	Mapped bool
 	gguf   *GGUFFile
 	st     *SafeTensorsFile
+
+	// tritPack caches absmean-quantized trit planes per tensor name (v1.07).
+	// Lazily filled by PrepackTrit / LinearTritCached; cleared on session close.
+	tritMu   sync.Mutex
+	tritPack map[string]*TritPack
+}
+
+// TritPack is a whole-tensor absmean trit packing retained on a session.
+// One global scale over the flat M*K body (matches LinearTrit with tileRows=M).
+type TritPack struct {
+	Name  string
+	M     int
+	K     int
+	Scale float32
+	W     []int8    // row-major M*K trits
+	Pos   []uint32  // M * nw packed positive planes
+	Neg   []uint32  // M * nw packed negative planes
+	NW    int       // words per row: (K+31)/32
 }
 
 var (
@@ -90,6 +108,7 @@ func CloseSession(id int32) error {
 	if !ok || s == nil {
 		return nil
 	}
+	s.ClearTritPacks()
 	var err error
 	if s.gguf != nil {
 		err = s.gguf.Close()
@@ -103,6 +122,16 @@ func CloseSession(id int32) error {
 	}
 	s.Mapped = false
 	return err
+}
+
+// ClearTritPacks drops all cached trit packs for this session.
+func (s *WeightSession) ClearTritPacks() {
+	if s == nil {
+		return
+	}
+	s.tritMu.Lock()
+	s.tritPack = nil
+	s.tritMu.Unlock()
 }
 
 // List returns tensor names without decoding bodies.

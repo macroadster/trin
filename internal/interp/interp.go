@@ -10063,6 +10063,92 @@ func (it *Interpreter) installBuiltins() {
 		}
 		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
 	})
+	// weight_session_prepack_trit(id, name, K) → i32 built (1=new, 0=cache hit)  (v1.07)
+	nat("weight_session_prepack_trit", func(args []Value) (Value, error) {
+		if len(args) < 3 {
+			return Void(), &Error{Msg: "weight_session_prepack_trit(id, name, K)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_prepack_trit: " + err.Error()}
+		}
+		built, err := s.PrepackTrit(strArg(args[1]), args[2].AsInt())
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_prepack_trit: " + err.Error()}
+		}
+		if built {
+			return I32(1), nil
+		}
+		return I32(0), nil
+	})
+	// weight_session_has_trit_pack(id, name) → i32 1/0
+	nat("weight_session_has_trit_pack", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "weight_session_has_trit_pack(id, name)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_has_trit_pack: " + err.Error()}
+		}
+		if s.HasTritPack(strArg(args[1])) {
+			return I32(1), nil
+		}
+		return I32(0), nil
+	})
+	// weight_session_trit_pack_info(id, name) → [M, K, scale, hit]
+	nat("weight_session_trit_pack_info", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "weight_session_trit_pack_info(id, name)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_trit_pack_info: " + err.Error()}
+		}
+		M, K, sc, ok := s.TritPackInfo(strArg(args[1]))
+		hit := 0
+		if ok {
+			hit = 1
+		}
+		return Span([]Value{I32(M), I32(K), F32(float64(sc)), I32(hit)}), nil
+	})
+	// weight_session_drop_trit_pack(id, name) → void
+	nat("weight_session_drop_trit_pack", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "weight_session_drop_trit_pack(id, name)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_drop_trit_pack: " + err.Error()}
+		}
+		s.DropTritPack(strArg(args[1]))
+		return Void(), nil
+	})
+	// weight_session_linear_trit_cached(id, name, x, M, K [, bitplane]) → [y, scale]
+	// Uses / builds whole-tensor prepack; bitplane uses packed planes without re-pack.
+	nat("weight_session_linear_trit_cached", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "weight_session_linear_trit_cached(id, name, x, M, K [, bitplane])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit_cached: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		bitplane := false
+		if len(args) >= 6 {
+			bitplane = args[5].AsFloat() != 0 || args[5].AsInt() != 0
+		}
+		y, scale, err := s.LinearTritCached(strArg(args[1]), x, M, K, bitplane)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_linear_trit_cached: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
+	})
 	// load_gguf_linear(path, name, x, M, K [, tileRows]) one-shot
 	nat("load_gguf_linear", func(args []Value) (Value, error) {
 		if len(args) < 5 || args[2].Kind != VSpan {

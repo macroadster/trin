@@ -71,8 +71,44 @@ func LinearTritPlanes(W []int8, x []float32, M, K int, scale float32) []float32 
 	}
 	nw := (K + 31) / 32
 	for i := 0; i < M; i++ {
-		pos, neg := packInt8Words(W[i*K:i*K+K])
+		pos, neg := packInt8Words(W[i*K : i*K+K])
 		acc := mixedDotPlanes(pos, neg, x, K, nw)
+		out[i] = scale * float32(acc)
+	}
+	return out
+}
+
+// PackTritMatrix builds row-major pos/neg planes for M×K trit matrix W.
+// Returns flat pos/neg of length M*nw and nw=(K+31)/32.
+func PackTritMatrix(W []int8, M, K int) (pos, neg []uint32, nw int) {
+	if M <= 0 || K <= 0 {
+		return []uint32{}, []uint32{}, 0
+	}
+	nw = (K + 31) / 32
+	pos = make([]uint32, M*nw)
+	neg = make([]uint32, M*nw)
+	for i := 0; i < M; i++ {
+		rp, rn := packInt8Words(W[i*K : i*K+K])
+		copy(pos[i*nw:(i+1)*nw], rp)
+		copy(neg[i*nw:(i+1)*nw], rn)
+	}
+	return pos, neg, nw
+}
+
+// LinearTritPlanesPacked matvec using already-packed pos/neg planes (no re-pack).
+// pos/neg are flat M*nw words; nw must be (K+31)/32.
+func LinearTritPlanesPacked(pos, neg []uint32, x []float32, M, K, nw int, scale float32) []float32 {
+	out := make([]float32, M)
+	if M <= 0 || K <= 0 || nw <= 0 {
+		return out
+	}
+	for i := 0; i < M; i++ {
+		off := i * nw
+		end := off + nw
+		if end > len(pos) || end > len(neg) {
+			break
+		}
+		acc := mixedDotPlanes(pos[off:end], neg[off:end], x, K, nw)
 		out[i] = scale * float32(acc)
 	}
 	return out
