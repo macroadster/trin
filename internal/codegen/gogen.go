@@ -9171,6 +9171,10 @@ type weightSess struct {
 	// trit prepack cache (v1.07)
 	tritMu   sync.Mutex
 	tritPack map[string]*tritPack
+	// name map short→on-disk (v1.17)
+	nameMu  sync.Mutex
+	nameMap map[string]string
+	nameStyle string
 }
 type tritPack struct {
 	Name  string
@@ -9284,10 +9288,156 @@ func (s *weightSess) list() ([]string, error) {
 	}
 }
 
+func (s *weightSess) resolveOnDisk(name string) string {
+	if s == nil {
+		return name
+	}
+	s.nameMu.Lock()
+	defer s.nameMu.Unlock()
+	if s.nameMap == nil {
+		return name
+	}
+	if r, ok := s.nameMap[name]; ok && r != "" {
+		return r
+	}
+	return name
+}
+
+func (s *weightSess) setNameMap(m map[string]string, style string) {
+	if s == nil {
+		return
+	}
+	s.nameMu.Lock()
+	s.nameMap = m
+	s.nameStyle = style
+	s.nameMu.Unlock()
+}
+
+func (s *weightSess) getNameStyle() string {
+	if s == nil {
+		return "identity"
+	}
+	s.nameMu.Lock()
+	st := s.nameStyle
+	s.nameMu.Unlock()
+	if st == "" {
+		return "identity"
+	}
+	return st
+}
+
+func (s *weightSess) resolveNameCSV(csv string) string {
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, s.resolveOnDisk(p))
+	}
+	return strings.Join(out, ",")
+}
+
+func llamaAliasesCG(nLayers int, tied bool) map[string]string {
+	m := map[string]string{
+		"tok_emb":    "token_embd.weight",
+		"final_norm": "output_norm.weight",
+	}
+	if tied {
+		m["lm_head"] = "token_embd.weight"
+	} else {
+		m["lm_head"] = "output.weight"
+	}
+	for i := 0; i < nLayers; i++ {
+		si := fmt.Sprintf("%d", i)
+		blk := "blk." + si + "."
+		m["L"+si+"_q"] = blk + "attn_q.weight"
+		m["L"+si+"_k"] = blk + "attn_k.weight"
+		m["L"+si+"_v"] = blk + "attn_v.weight"
+		m["L"+si+"_o"] = blk + "attn_output.weight"
+		m["L"+si+"_gate"] = blk + "ffn_gate.weight"
+		m["L"+si+"_up"] = blk + "ffn_up.weight"
+		m["L"+si+"_down"] = blk + "ffn_down.weight"
+		m["L"+si+"_an"] = blk + "attn_norm.weight"
+		m["L"+si+"_fn"] = blk + "ffn_norm.weight"
+	}
+	return m
+}
+
+func detectNameMapCG(names []string, nLayersHint int) (map[string]string, string) {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	hasLlama := set["token_embd.weight"] || set["blk.0.attn_q.weight"]
+	if !hasLlama {
+		for n := range set {
+			if strings.HasPrefix(n, "blk.") && strings.Contains(n, "attn_q") {
+				hasLlama = true
+				break
+			}
+		}
+	}
+	if !hasLlama {
+		return map[string]string{}, "identity"
+	}
+	nL := nLayersHint
+	if nL <= 0 {
+		for i := 0; i < 256; i++ {
+			a := fmt.Sprintf("blk.%d.attn_q.weight", i)
+			b := fmt.Sprintf("blk.%d.attn_q", i)
+			if set[a] || set[b] {
+				nL = i + 1
+			} else if i > 0 {
+				break
+			} else {
+				break
+			}
+		}
+		if nL <= 0 {
+			nL = 1
+		}
+	}
+	tied := !set["output.weight"] && !set["output"]
+	m := llamaAliasesCG(nL, tied)
+	// prefer present suffix form
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if set[v] {
+			out[k] = v
+			continue
+		}
+		if strings.HasSuffix(v, ".weight") {
+			alt := strings.TrimSuffix(v, ".weight")
+			if set[alt] {
+				out[k] = alt
+				continue
+			}
+		} else if set[v+".weight"] {
+			out[k] = v + ".weight"
+			continue
+		}
+		out[k] = v
+	}
+	return out, "llama"
+}
+
+func (s *weightSess) autoNameMap(nLayersHint int) (string, error) {
+	names, err := s.list()
+	if err != nil {
+		return "", err
+	}
+	m, style := detectNameMapCG(names, nLayersHint)
+	s.setNameMap(m, style)
+	return style, nil
+}
+
 func (s *weightSess) shape(name string) ([]int64, error) {
 	if s == nil {
 		return nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {
@@ -9327,6 +9477,7 @@ func (s *weightSess) loadF32(name string) ([]float32, []int64, error) {
 	if s == nil {
 		return nil, nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {
@@ -9347,6 +9498,7 @@ func (s *weightSess) loadF32Window(name string, offset, count int) ([]float32, e
 	if s == nil {
 		return nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {
@@ -11512,6 +11664,7 @@ func (s *weightSess) prepackTrit(name string, K int) (bool, error) {
 	if K <= 0 {
 		return false, fmt.Errorf("prepack_trit: bad K")
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	if s.tritPack != nil {
 		if p := s.tritPack[name]; p != nil && p.K == K {
@@ -11559,6 +11712,7 @@ func (s *weightSess) hasTritPack(name string) bool {
 	if s == nil {
 		return false
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	defer s.tritMu.Unlock()
 	if s.tritPack == nil {
@@ -11571,6 +11725,7 @@ func (s *weightSess) tritPackInfo(name string) (M, K int, scale float32, ok bool
 	if s == nil {
 		return 0, 0, 0, false
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	defer s.tritMu.Unlock()
 	if s.tritPack == nil {
@@ -11587,6 +11742,7 @@ func (s *weightSess) dropTritPack(name string) {
 	if s == nil {
 		return
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	if s.tritPack != nil {
 		delete(s.tritPack, name)
@@ -11604,6 +11760,7 @@ func (s *weightSess) linearTritCached(name string, x []float32, M, K int, bitpla
 	if len(x) < K {
 		return nil, 0, fmt.Errorf("linear_trit_cached: x short")
 	}
+	name = s.resolveOnDisk(name)
 	if _, err := s.prepackTrit(name, K); err != nil {
 		return nil, 0, err
 	}
@@ -11758,6 +11915,62 @@ func biWeightSessionList(id val) val {
 		out[i] = vStr(n)
 	}
 	return vSpan(out)
+}
+
+func biWeightSessionAutoNameMap(id val) val {
+	return biWeightSessionAutoNameMapH(id, vI32(0))
+}
+func biWeightSessionAutoNameMapH(id, hint val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_auto_namemap: %v\n", err)
+		os.Exit(1)
+	}
+	style, err := s.autoNameMap(asI(hint))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_auto_namemap: %v\n", err)
+		os.Exit(1)
+	}
+	return vStr(style)
+}
+func biWeightSessionResolveName(id, short val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_resolve_name: %v\n", err)
+		os.Exit(1)
+	}
+	return vStr(s.resolveOnDisk(fmtVal(short)))
+}
+func biWeightSessionResolveCSV(id, csv val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_resolve_csv: %v\n", err)
+		os.Exit(1)
+	}
+	return vStr(s.resolveNameCSV(fmtVal(csv)))
+}
+func biWeightSessionNameMapStyle(id val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_namemap_style: %v\n", err)
+		os.Exit(1)
+	}
+	return vStr(s.getNameStyle())
+}
+func biWeightSessionExpandLayers(id, nL, role val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_expand_layers: %v\n", err)
+		os.Exit(1)
+	}
+	n := asI(nL)
+	r := fmtVal(role)
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf("L%d_%s", i, r))
+	}
+	csv := strings.Join(parts, ",")
+	return vStr(s.resolveNameCSV(csv))
 }
 func biWeightSessionShape(id, name val) val {
 	s, err := getWeightSession(int32(asI(id)))
@@ -16284,6 +16497,20 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 		fmt.Fprintf(g.b, "\t%s := biLoadGgufWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
 	case "load_safetensors_window":
 		fmt.Fprintf(g.b, "\t%s := biLoadSafetensorsWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+	case "weight_session_auto_namemap":
+		if len(args) >= 2 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAutoNameMapH(%s, %s)\n", tmp, args[0], args[1])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionAutoNameMap(%s)\n", tmp, args[0])
+		}
+	case "weight_session_resolve_name":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionResolveName(%s, %s)\n", tmp, args[0], args[1])
+	case "weight_session_resolve_csv":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionResolveCSV(%s, %s)\n", tmp, args[0], args[1])
+	case "weight_session_namemap_style":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionNameMapStyle(%s)\n", tmp, args[0])
+	case "weight_session_expand_layers":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionExpandLayers(%s, %s, %s)\n", tmp, args[0], args[1], args[2])
 	case "weight_session_meta":
 		fmt.Fprintf(g.b, "\t%s := biWeightSessionMeta(%s, %s)\n", tmp, args[0], args[1])
 	case "weight_session_mapped":

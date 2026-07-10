@@ -9571,6 +9571,75 @@ func (it *Interpreter) installBuiltins() {
 		}
 		return Str(s.Meta(strArg(args[1]))), nil
 	})
+
+	// weight_session_auto_namemap(id [, nLayersHint]) → style string (v1.17)
+	nat("weight_session_auto_namemap", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "weight_session_auto_namemap(id [, nLayersHint])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_auto_namemap: " + err.Error()}
+		}
+		hint := 0
+		if len(args) >= 2 {
+			hint = args[1].AsInt()
+		}
+		m, err := s.AutoNameMap(hint)
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_auto_namemap: " + err.Error()}
+		}
+		return Str(m.Style), nil
+	})
+
+	// weight_session_resolve_name(id, short) → on-disk name
+	nat("weight_session_resolve_name", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "weight_session_resolve_name(id, short)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_resolve_name: " + err.Error()}
+		}
+		return Str(s.ResolveName(strArg(args[1]))), nil
+	})
+
+	// weight_session_resolve_csv(id, csv) → resolved CSV
+	nat("weight_session_resolve_csv", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "weight_session_resolve_csv(id, csv)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_resolve_csv: " + err.Error()}
+		}
+		return Str(s.ResolveNameCSV(strArg(args[1]))), nil
+	})
+
+	// weight_session_namemap_style(id) → style string
+	nat("weight_session_namemap_style", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "weight_session_namemap_style(id)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_namemap_style: " + err.Error()}
+		}
+		return Str(s.GetNameMap().Style), nil
+	})
+
+	// weight_session_expand_layers(id, nLayers, role) → resolved CSV of L{i}_role
+	nat("weight_session_expand_layers", func(args []Value) (Value, error) {
+		if len(args) < 3 {
+			return Void(), &Error{Msg: "weight_session_expand_layers(id, nLayers, role)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "weight_session_expand_layers: " + err.Error()}
+		}
+		csv := weights.ExpandLayerCSV(args[1].AsInt(), strArg(args[2]))
+		return Str(s.ResolveNameCSV(csv)), nil
+	})
 	// weight_session_mapped(id) → i32
 	nat("weight_session_mapped", func(args []Value) (Value, error) {
 		if len(args) < 1 {

@@ -209,6 +209,7 @@ func LinearTritGGUF(path, name string, x []float32, M, K, tileRows int, bitplane
 // PrepackTrit quantizes tensor name as absmean trits once and caches trit + packed planes.
 // Uses the full flat body (global scale). Re-packing the same name is a no-op (returns existing).
 // Returns whether a new pack was built (false = cache hit / already present).
+// Name is resolved through the session NameMap; packs are keyed by on-disk name.
 func (s *WeightSession) PrepackTrit(name string, K int) (built bool, err error) {
 	if s == nil {
 		return false, fmt.Errorf("nil session")
@@ -216,6 +217,7 @@ func (s *WeightSession) PrepackTrit(name string, K int) (built bool, err error) 
 	if K <= 0 {
 		return false, fmt.Errorf("prepack_trit: bad K")
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	if s.tritPack != nil {
 		if p := s.tritPack[name]; p != nil && p.K == K {
@@ -268,6 +270,7 @@ func (s *WeightSession) HasTritPack(name string) bool {
 	if s == nil {
 		return false
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	defer s.tritMu.Unlock()
 	if s.tritPack == nil {
@@ -281,6 +284,7 @@ func (s *WeightSession) TritPackInfo(name string) (M, K int, scale float32, ok b
 	if s == nil {
 		return 0, 0, 0, false
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	defer s.tritMu.Unlock()
 	if s.tritPack == nil {
@@ -298,6 +302,7 @@ func (s *WeightSession) DropTritPack(name string) {
 	if s == nil {
 		return
 	}
+	name = s.resolveOnDisk(name)
 	s.tritMu.Lock()
 	if s.tritPack != nil {
 		delete(s.tritPack, name)
@@ -318,6 +323,7 @@ func (s *WeightSession) LinearTritCached(name string, x []float32, M, K int, bit
 	if len(x) < K {
 		return nil, 0, fmt.Errorf("linear_trit_cached: x short")
 	}
+	name = s.resolveOnDisk(name)
 	if _, err := s.PrepackTrit(name, K); err != nil {
 		return nil, 0, err
 	}

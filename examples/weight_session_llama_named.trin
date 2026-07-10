@@ -1,0 +1,171 @@
+// v1.17 — llama.cpp-style GGUF names via auto namemap
+// Fixture: demos/weights/tiny_llama_named.gguf
+// Uses short names (L0_q / tok_emb) after weight_session_auto_namemap.
+
+fn main() {
+    let vid = open_vocab("demos/weights/tiny_llm.vocab");
+    let prompt = "AB";
+    let ids = vocab_encode(vid, prompt);
+    println(str_concat("prompt=", prompt));
+    println(str_concat("prompt_ids=", to_str(ids)));
+
+    let sid = open_weight_session("demos/weights/tiny_llama_named.gguf");
+    let style0 = weight_session_namemap_style(sid);
+    println(str_concat("style_before=", style0));
+    let style = weight_session_auto_namemap(sid, 2);
+    println(str_concat("style=", style));
+    let style1 = weight_session_namemap_style(sid);
+    println(str_concat("style_after=", style1));
+
+    let r_tok = weight_session_resolve_name(sid, "tok_emb");
+    let r_q0 = weight_session_resolve_name(sid, "L0_q");
+    let r_g1 = weight_session_resolve_name(sid, "L1_gate");
+    let r_fn = weight_session_resolve_name(sid, "final_norm");
+    println(str_concat("resolve_tok=", r_tok));
+    println(str_concat("resolve_L0_q=", r_q0));
+    println(str_concat("resolve_L1_gate=", r_g1));
+    println(str_concat("resolve_final=", r_fn));
+
+    let exp_q = weight_session_expand_layers(sid, 2, "q");
+    println(str_concat("expand_q=", exp_q));
+
+    let dim = 4;
+    let vocab = 8;
+    let hidden = 8;
+    let nLayers = 2;
+    let nHeads = 2;
+    let nKV = 1;
+    let dKV = 2;
+    let bp = 1;
+    let eps = 0.000001;
+    let empty = [];
+
+    // short-name prepack
+    let p1a = weight_session_prepack_trit_csv(sid,
+        "tok_emb,L0_q,L0_k,L0_v,L0_o,L0_gate,L0_up,L1_q,L1_k,L1_v,L1_o,L1_gate,L1_up", dim);
+    let p1b = weight_session_prepack_trit_csv(sid, "L0_down,L1_down", hidden);
+    let p2a = weight_session_prepack_trit_csv(sid,
+        "tok_emb,L0_q,L0_k,L0_v,L0_o,L0_gate,L0_up,L1_q,L1_k,L1_v,L1_o,L1_gate,L1_up", dim);
+    let p2b = weight_session_prepack_trit_csv(sid, "L0_down,L1_down", hidden);
+    println(str_concat("prepack_built=", to_str(p1a[0] + p1b[0])));
+    println(str_concat("prepack_hits1=", to_str(p1a[1] + p1b[1])));
+    println(str_concat("prepack_built2=", to_str(p2a[0] + p2b[0])));
+    println(str_concat("prepack_hits2=", to_str(p2a[1] + p2b[1])));
+    let packs = weight_session_has_trit_pack(sid, "tok_emb")
+        * weight_session_has_trit_pack(sid, "L0_gate")
+        * weight_session_has_trit_pack(sid, "L1_down");
+    println(str_concat("all_packs_present=", to_str(packs)));
+
+    // resolved CSV prepack hits same packs
+    let real_csv = weight_session_resolve_csv(sid, "tok_emb,L0_q");
+    let pr = weight_session_prepack_trit_csv(sid, real_csv, dim);
+    println(str_concat("real_csv_hits=", to_str(pr[1])));
+
+    let qCSV = "L0_q,L1_q";
+    let kCSV = "L0_k,L1_k";
+    let vCSV = "L0_v,L1_v";
+    let oCSV = "L0_o,L1_o";
+    let gateCSV = "L0_gate,L1_gate";
+    let upCSV = "L0_up,L1_up";
+    let downCSV = "L0_down,L1_down";
+    let anCSV = "L0_an,L1_an";
+    let fnCSV = "L0_fn,L1_fn";
+
+    let t0 = ids[0];
+    let t1 = ids[1];
+    let x0 = weight_session_embed_row(sid, "tok_emb", t0, dim);
+    let x1 = weight_session_embed_row(sid, "tok_emb", t1, dim);
+    // also load via real name
+    let x0r = weight_session_embed_row(sid, "token_embd.weight", t0, dim);
+    let er = x0[0] - x0r[0];
+    let ed = (er < 0.0) | (0.0 - er) | er;
+    let emb_ok = (ed < 0.0001);
+    println(str_concat("emb_ok=", to_str(emb_ok)));
+
+    let xs = [x0[0], x0[1], x0[2], x0[3], x1[0], x1[1], x1[2], x1[3]];
+
+    let pf = weight_session_gqa_swiglu_prefill_alibi(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        xs, empty, empty, dim, hidden, nHeads, nKV, 2,
+        anCSV, fnCSV, 0.0, bp, eps);
+    let Yf = pf[0];
+    let Kp = pf[1];
+    let Vp = pf[2];
+    let yLast = pf[3];
+    println(str_concat("Yflat_len=", to_str(len(Yf))));
+    println(str_concat("prefill_kv_len=", to_str(len(Kp))));
+
+    // sequential parity
+    let s0 = weight_session_gqa_swiglu_stack_alibi(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x0, empty, empty, dim, hidden, nHeads, nKV, 2,
+        anCSV, fnCSV, 0.0, bp, eps);
+    let s1 = weight_session_gqa_swiglu_stack_alibi(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x1, s0[1], s0[2], dim, hidden, nHeads, nKV, 2,
+        anCSV, fnCSV, 1.0, bp, eps);
+    let d0r = Yf[0] - s0[0][0];
+    let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+    let d1r = yLast[0] - s1[0][0];
+    let d1 = (d1r < 0.0) | (0.0 - d1r) | d1r;
+    let parity_ok = (d0 < 0.0001) * (d1 < 0.0001);
+    println(str_concat("parity_ok=", to_str(parity_ok)));
+
+    let yBn = weight_session_final_norm(sid, yLast, dim, "final_norm", eps);
+    let logits1 = weight_session_logits_tied(sid, "tok_emb", yBn, dim);
+    let logits1t = weight_session_logits_tied_trit(sid, "tok_emb", yBn, dim, bp);
+    let gtok1 = sample_logits(logits1, 0.0);
+    let gtok1t = sample_logits(logits1t, 0.0);
+    println(str_concat("gen1=", to_str(gtok1)));
+    println(str_concat("gen1_tok=", vocab_token(vid, gtok1)));
+    let tied_match = (gtok1 == gtok1t);
+    println(str_concat("tied_match=", to_str(tied_match)));
+
+    let x2 = weight_session_embed_row(sid, "tok_emb", gtok1, dim);
+    let st2 = weight_session_gqa_swiglu_stack_alibi(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x2, Kp, Vp, dim, hidden, nHeads, nKV, 2,
+        anCSV, fnCSV, 2.0, bp, eps);
+    let y2n = weight_session_final_norm(sid, st2[0], dim, "final_norm", eps);
+    let gtok2 = sample_logits(weight_session_logits_tied(sid, "tok_emb", y2n, dim), 0.0);
+    println(str_concat("gen2=", to_str(gtok2)));
+    println(str_concat("gen2_tok=", vocab_token(vid, gtok2)));
+
+    let x3 = weight_session_embed_row(sid, "tok_emb", gtok2, dim);
+    let st3 = weight_session_gqa_swiglu_stack_alibi(
+        sid, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV,
+        x3, st2[1], st2[2], dim, hidden, nHeads, nKV, 2,
+        anCSV, fnCSV, 3.0, bp, eps);
+    let y3n = weight_session_final_norm(sid, st3[0], dim, "final_norm", eps);
+    let gtok3 = sample_logits(weight_session_logits_tied(sid, "tok_emb", y3n, dim), 0.0);
+    println(str_concat("gen3=", to_str(gtok3)));
+    println(str_concat("gen3_tok=", vocab_token(vid, gtok3)));
+    println(str_concat("final_kv_flat_len=", to_str(len(st3[1]))));
+    let grow_ok = (len(st3[1]) == nLayers * 4 * dKV) * (len(st3[2]) == nLayers * 4 * dKV);
+    println(str_concat("grow_final_ok=", to_str(grow_ok)));
+
+    let out_ids = [gtok1, gtok2, gtok3];
+    println(str_concat("gen_text=", vocab_decode(vid, out_ids)));
+
+    let name_ok = (style == "llama") * (style1 == "llama")
+        * (r_tok == "token_embd.weight")
+        * (r_q0 == "blk.0.attn_q.weight")
+        * (r_g1 == "blk.1.ffn_gate.weight")
+        * (r_fn == "output_norm.weight")
+        * (exp_q == "blk.0.attn_q.weight,blk.1.attn_q.weight");
+    println(str_concat("name_ok=", to_str(name_ok)));
+
+    let hit_ok = (p1a[0] + p1b[0] == 15) * (p2a[0] + p2b[0] == 0)
+        * (p2a[1] + p2b[1] == 15) * packs * (pr[1] == 2);
+    let decode_ok = (len(ids) == 2) * grow_ok * emb_ok * tied_match
+        * (gtok1 >= 0) * (gtok1 < vocab)
+        * (gtok2 >= 0) * (gtok2 < vocab)
+        * (gtok3 >= 0) * (gtok3 < vocab);
+    println(str_concat("cache_hit_ok=", to_str(hit_ok)));
+    println(str_concat("decode_ok=", to_str(decode_ok)));
+    println(str_concat("weight_session_llama_named_ok=", to_str(name_ok * hit_ok * parity_ok * decode_ok)));
+    println("weight_session_llama_named_ok");
+
+    close_weight_session(sid);
+    close_vocab(vid);
+}

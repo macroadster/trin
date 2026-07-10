@@ -21,6 +21,11 @@ type WeightSession struct {
 	// Lazily filled by PrepackTrit / LinearTritCached; cleared on session close.
 	tritMu   sync.Mutex
 	tritPack map[string]*TritPack
+
+	// nameMap maps short/canonical names → on-disk tensor names (v1.17).
+	// nil = identity. Lookups resolve before List misses.
+	nameMu  sync.Mutex
+	nameMap *NameMap
 }
 
 // TritPack is a whole-tensor absmean trit packing retained on a session.
@@ -155,11 +160,20 @@ func (s *WeightSession) List() ([]string, error) {
 	}
 }
 
-// Shape returns dims for a tensor name.
+// resolveOnDisk applies the session NameMap (identity if unset).
+func (s *WeightSession) resolveOnDisk(name string) string {
+	if s == nil {
+		return name
+	}
+	return s.ResolveName(name)
+}
+
+// Shape returns dims for a tensor name (accepts short or on-disk names).
 func (s *WeightSession) Shape(name string) ([]int64, error) {
 	if s == nil {
 		return nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {
@@ -197,10 +211,12 @@ func (s *WeightSession) Meta(key string) string {
 }
 
 // LoadF32 decodes one named tensor using the retained mapping.
+// Name is resolved through the session NameMap when set (v1.17).
 func (s *WeightSession) LoadF32(name string) ([]float32, []int64, error) {
 	if s == nil {
 		return nil, nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {
@@ -226,10 +242,12 @@ func SessionCount() int {
 
 
 // LoadF32Window loads a contiguous element window from a retained session.
+// Name is resolved through the session NameMap when set (v1.17).
 func (s *WeightSession) LoadF32Window(name string, offset, count int) ([]float32, error) {
 	if s == nil {
 		return nil, fmt.Errorf("nil session")
 	}
+	name = s.resolveOnDisk(name)
 	switch s.Kind {
 	case "gguf":
 		if s.gguf == nil {

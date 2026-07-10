@@ -190,6 +190,7 @@ func (s *WeightSession) LinearRowsFused(name string, x []float32, K, row0, nRows
 	if row0 < 0 {
 		return nil, fmt.Errorf("linear_fused: negative row0")
 	}
+	name = s.resolveOnDisk(name)
 	nElem, _, err := s.tensorNElem(name)
 	if err != nil {
 		return nil, err
