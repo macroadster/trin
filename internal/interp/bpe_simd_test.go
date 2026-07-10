@@ -475,3 +475,39 @@ func TestWeightSessionLlamaNamedDemo(t *testing.T) {
 		}
 	}
 }
+
+func TestWeightSessionAlibiWindowDemo(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_tied_alibi.gguf")); err != nil {
+		t.Skip("missing demos/weights/tiny_tied_alibi.gguf")
+	}
+	if _, err := os.Stat(filepath.Join(root, "demos/weights/tiny_llm.vocab")); err != nil {
+		t.Skip("missing demos/weights/tiny_llm.vocab")
+	}
+	src, err := os.ReadFile(filepath.Join(root, "examples/weight_session_alibi_window.trin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	out := runOK(t, string(src))
+	for _, k := range []string{
+		"weight_session_alibi_window_ok",
+		"window_ok=1",
+		"parity0_ok=1",
+		"parity_ok=1",
+		"decode_ok=1",
+		"window_mask_only=1",
+		"grow_final_ok=1",
+		"gen_text=FFF",
+		"prepack_built=15",
+		"final_kv_flat_len=16",
+	} {
+		if !strings.Contains(out, k) {
+			t.Fatalf("missing %s in %q", k, out)
+		}
+	}
+}

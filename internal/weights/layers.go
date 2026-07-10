@@ -1011,6 +1011,7 @@ func (s *WeightSession) LogitsTiedTrit(embName string, h []float32, dim int, bit
 }
 
 // ForwardGQASwiGLUBlockTritAlibi is ForwardGQASwiGLUBlockTrit with ALiBi (no RoPE).
+// Full history (window=0).
 func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibi(
 	spec AttnLayerSpec,
 	x, Kpast, Vpast []float32,
@@ -1019,6 +1020,21 @@ func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibi(
 	bitplane bool,
 	eps float64,
 	slopes []float32,
+) (y, Knew, Vnew []float32, err error) {
+	return s.ForwardGQASwiGLUBlockTritAlibiWindow(spec, x, Kpast, Vpast, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, slopes, 0)
+}
+
+// ForwardGQASwiGLUBlockTritAlibiWindow is ALiBi SwiGLU block with sliding window (v1.18).
+// window<=0 → full history.
+func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibiWindow(
+	spec AttnLayerSpec,
+	x, Kpast, Vpast []float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+	slopes []float32,
+	window int,
 ) (y, Knew, Vnew []float32, err error) {
 	if s == nil {
 		return nil, nil, nil, fmt.Errorf("nil session")
@@ -1050,10 +1066,10 @@ func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibi(
 		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi attn gain %q: %w", spec.AttnGain, err)
 	}
 	xn := RMSNormF32(xIn, eps, attnGain)
-	a, Knew, Vnew, err := s.SessionAttnGQATritAlibi(
+	a, Knew, Vnew, err := s.SessionAttnGQATritAlibiWindow(
 		spec.Q, spec.K, spec.V, spec.O,
 		xn, Kpast, Vpast,
-		dim, nHeads, nKVHeads, dh, pos, bitplane, slopes,
+		dim, nHeads, nKVHeads, dh, pos, bitplane, slopes, window,
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi attn: %w", err)
@@ -1093,7 +1109,7 @@ func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibi(
 	return y, Knew, Vnew, nil
 }
 
-// GQASwiGLUStackTritAlibi chains ALiBi SwiGLU GQA blocks.
+// GQASwiGLUStackTritAlibi chains ALiBi SwiGLU GQA blocks (full history).
 func (s *WeightSession) GQASwiGLUStackTritAlibi(
 	layers []AttnLayerSpec,
 	x []float32,
@@ -1103,6 +1119,22 @@ func (s *WeightSession) GQASwiGLUStackTritAlibi(
 	bitplane bool,
 	eps float64,
 	slopes []float32,
+) (y []float32, Knews, Vnews [][]float32, err error) {
+	return s.GQASwiGLUStackTritAlibiWindow(layers, x, Kpasts, Vpasts, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, slopes, 0)
+}
+
+// GQASwiGLUStackTritAlibiWindow chains ALiBi SwiGLU GQA with sliding window (v1.18).
+// window<=0 → full history.
+func (s *WeightSession) GQASwiGLUStackTritAlibiWindow(
+	layers []AttnLayerSpec,
+	x []float32,
+	Kpasts, Vpasts [][]float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+	slopes []float32,
+	window int,
 ) (y []float32, Knews, Vnews [][]float32, err error) {
 	if s == nil {
 		return nil, nil, nil, fmt.Errorf("nil session")
@@ -1125,7 +1157,7 @@ func (s *WeightSession) GQASwiGLUStackTritAlibi(
 		if i < len(Vpasts) {
 			vp = Vpasts[i]
 		}
-		next, kn, vn, e := s.ForwardGQASwiGLUBlockTritAlibi(spec, cur, kp, vp, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, slopes)
+		next, kn, vn, e := s.ForwardGQASwiGLUBlockTritAlibiWindow(spec, cur, kp, vp, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, slopes, window)
 		if e != nil {
 			return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi layer %d: %w", i, e)
 		}
@@ -1145,6 +1177,22 @@ func (s *WeightSession) GQASwiGLUStackTritAlibiCSV(
 	bitplane bool,
 	eps float64,
 ) (y, KnewFlat, VnewFlat []float32, err error) {
+	return s.GQASwiGLUStackTritAlibiWindowCSV(
+		qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV,
+		x, KpastFlat, VpastFlat, dim, hidden, nHeads, nKVHeads, dh, pos, bitplane, eps, 0,
+	)
+}
+
+// GQASwiGLUStackTritAlibiWindowCSV is ALiBi stack with window (v1.18).
+func (s *WeightSession) GQASwiGLUStackTritAlibiWindowCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+	window int,
+) (y, KnewFlat, VnewFlat []float32, err error) {
 	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
 		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: bad heads")
 	}
@@ -1162,7 +1210,7 @@ func (s *WeightSession) GQASwiGLUStackTritAlibiCSV(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	y, Knews, Vnews, err := s.GQASwiGLUStackTritAlibi(layers, x, Kpasts, Vpasts, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil)
+	y, Knews, Vnews, err := s.GQASwiGLUStackTritAlibiWindow(layers, x, Kpasts, Vpasts, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil, window)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1177,6 +1225,22 @@ func (s *WeightSession) PrefillGQASwiGLUStackTritAlibiCSV(
 	startPos float64,
 	bitplane bool,
 	eps float64,
+) (Yflat, KnewFlat, VnewFlat, yLast []float32, err error) {
+	return s.PrefillGQASwiGLUStackTritAlibiWindowCSV(
+		qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV,
+		xs, KpastFlat, VpastFlat, dim, hidden, nHeads, nKVHeads, dh, startPos, bitplane, eps, 0,
+	)
+}
+
+// PrefillGQASwiGLUStackTritAlibiWindowCSV multi-token ALiBi prefill with window (v1.18).
+func (s *WeightSession) PrefillGQASwiGLUStackTritAlibiWindowCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	xs, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	startPos float64,
+	bitplane bool,
+	eps float64,
+	window int,
 ) (Yflat, KnewFlat, VnewFlat, yLast []float32, err error) {
 	if s == nil {
 		return nil, nil, nil, nil, fmt.Errorf("nil session")
@@ -1211,7 +1275,7 @@ func (s *WeightSession) PrefillGQASwiGLUStackTritAlibiCSV(
 	for t := 0; t < nTok; t++ {
 		x := xs[t*dim : (t+1)*dim]
 		pos := startPos + float64(t)
-		y, kCur, vCur, err = s.GQASwiGLUStackTritAlibi(layers, x, kCur, vCur, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil)
+		y, kCur, vCur, err = s.GQASwiGLUStackTritAlibiWindow(layers, x, kCur, vCur, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil, window)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi token %d: %w", t, err)
 		}

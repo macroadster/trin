@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.17.0-go  
+**Version:** 1.18.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10), plus **tiny GGUF greedy decode on session trit-attn** (v1.11), plus a **multi-layer residual trit-attn decoder stack** (v1.12), plus **multi-layer GGUF greedy decode on that stack** (v1.13), plus a **multi-layer residual GQA stack with final RMSNorm decode** (v1.14), plus **multi-token GQA SwiGLU prefill + residual decode** (v1.15), plus **tied emb + ALiBi residual decode** (v1.16), plus **llama.cpp-style GGUF name adapters** (v1.17).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10), plus **tiny GGUF greedy decode on session trit-attn** (v1.11), plus a **multi-layer residual trit-attn decoder stack** (v1.12), plus **multi-layer GGUF greedy decode on that stack** (v1.13), plus a **multi-layer residual GQA stack with final RMSNorm decode** (v1.14), plus **multi-token GQA SwiGLU prefill + residual decode** (v1.15), plus **tied emb + ALiBi residual decode** (v1.16), plus **llama.cpp-style GGUF name adapters** (v1.17), plus **sliding-window ALiBi** (v1.18).
 
 ## What is production-ready
 
@@ -34,7 +34,8 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 33. **GQA SwiGLU prefill (v1.15)** — `forward_gqa_swiglu_block_trit` / `gqa_swiglu_stack_trit` / `gqa_swiglu_prefill_trit`; Gate⊙Up FFN; causal multi-token prefill → generate `FFF`
 34. **Tied emb + ALiBi (v1.16)** — `embed_row` / `logits_tied[_trit]`; `gqa_swiglu_{stack,prefill}_alibi`; fixture `tiny_tied_alibi.gguf` → `FFF`
 35. **Name adapters (v1.17)** — `AutoNameMap` / `ResolveName`; short `L0_q`→`blk.0.attn_q.weight`; `tiny_llama_named.gguf` → `FFF`
-36–38. Linear trit, transformer cores, KV/sample, toolchain, verification
+36. **Sliding-window ALiBi (v1.18)** — `AlibiBiasWindow` + `*_alibi_window` stack/prefill; mask-only local attn; demo → `FFF`
+37–39. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -273,6 +274,19 @@ Language: `weight_session_auto_namemap`, `weight_session_resolve_name` / `_csv`,
 
 Demo: `examples/weight_session_llama_named.trin` — auto detect `llama`, prepack hits, generate `FFF`.
 
+## Sliding-window ALiBi (v1.18)
+
+| Piece | Role |
+|---|---|
+| `AlibiBiasWindow` / `AlibiBiasesWindow` | hard-mask keys with dist ≥ window |
+| `SessionAttnGQATritAlibiWindow` | GQA ALiBi + window |
+| `GQASwiGLUStackTritAlibiWindowCSV` / `Prefill…WindowCSV` | residual stack + prefill |
+| `TrimKVWindow` | optional physical KV trim helper |
+
+Language: `weight_session_gqa_swiglu_stack_alibi_window`, `weight_session_gqa_swiglu_prefill_alibi_window` (final `window` arg; ≤0 = full).
+
+Demo: `examples/weight_session_alibi_window.trin` — window=0 parity, window=2 decode `FFF`.
+
 ## Limits
 
 - CUDA **device execution** still needs a GPU host; this release ships the API + portable kernels.
@@ -336,6 +350,9 @@ Demo: `examples/weight_session_llama_named.trin` — auto detect `llama`, prepac
 - [x] Llama/HF-style GGUF name adapters
 - [x] Demo `weight_session_llama_named` (FFF)
 - [x] Version `1.17.0-go`
+- [x] Sliding-window ALiBi residual GQA
+- [x] Demo `weight_session_alibi_window` (FFF)
+- [x] Version `1.18.0-go`
 - [x] No bulk renames
 
 ## How to run

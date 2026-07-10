@@ -167,12 +167,24 @@ func AlibiSlopes(nHeads int) []float32 {
 	return out
 }
 
-// AlibiBias builds length-nTok bias for one head: bias[t] = -slope * (qPos - t)
-// for t=0..nTok-1, where t is absolute key position starting at (qPos-nTok+1).
-// When past grows left-to-right with absolute positions 0..qPos, key at index t
-// has position t if nTok == qPos+1 (full causal from 0). General form uses
+// alibiNegInf is used to hard-mask keys outside a sliding window.
+const alibiNegInf = float32(-1e9)
+
+// AlibiBias builds length-nTok bias for one head: bias[t] = -slope * dist
+// for t=0..nTok-1, where key positions run left-to-right ending at qPos.
+// When past grows with absolute positions 0..qPos, key at index t has
 // keyPos = qPos - (nTok-1) + t.
 func AlibiBias(nTok int, qPos, slope float64) []float32 {
+	return AlibiBiasWindow(nTok, qPos, slope, 0)
+}
+
+// AlibiBiasWindow is AlibiBias with optional local-attention window.
+// window <= 0 means full history (no hard mask). window > 0 keeps only the
+// last `window` key positions (including current): any key with
+// dist = qPos-keyPos >= window gets a large negative bias mask.
+// Example: window=1 attends only to the current token; window=2 keeps
+// current + previous one.
+func AlibiBiasWindow(nTok int, qPos, slope float64, window int) []float32 {
 	if nTok <= 0 {
 		return nil
 	}
@@ -183,13 +195,22 @@ func AlibiBias(nTok int, qPos, slope float64) []float32 {
 		keyPos := start + float64(t)
 		// standard ALiBi uses relative distance (q-k) with negative slope*dist
 		dist := qPos - keyPos // >= 0 for causal past
+		if window > 0 && dist >= float64(window) {
+			out[t] = alibiNegInf
+			continue
+		}
 		out[t] = float32(-slope * dist)
 	}
 	return out
 }
 
-// AlibiBiases builds per-head bias rows for MHA.
+// AlibiBiases builds per-head bias rows for MHA (full history).
 func AlibiBiases(nHeads, nTok int, qPos float64, slopes []float32) [][]float32 {
+	return AlibiBiasesWindow(nHeads, nTok, qPos, slopes, 0)
+}
+
+// AlibiBiasesWindow builds per-head bias rows with optional sliding window.
+func AlibiBiasesWindow(nHeads, nTok int, qPos float64, slopes []float32, window int) [][]float32 {
 	if nHeads <= 0 || nTok <= 0 {
 		return nil
 	}
@@ -202,8 +223,25 @@ func AlibiBiases(nHeads, nTok int, qPos float64, slopes []float32) [][]float32 {
 		if h < len(slopes) {
 			sl = float64(slopes[h])
 		}
-		out[h] = AlibiBias(nTok, qPos, sl)
+		out[h] = AlibiBiasWindow(nTok, qPos, sl, window)
 	}
+	return out
+}
+
+// TrimKVWindow keeps only the last `window` tokens of flat KV (dKV-wide).
+// window <= 0 returns kv unchanged. Used by optional physical KV trim;
+// attention mask is independent (bias hard-mask).
+func TrimKVWindow(kv []float32, dKV, window int) []float32 {
+	if window <= 0 || dKV <= 0 || len(kv) == 0 {
+		return kv
+	}
+	nTok := len(kv) / dKV
+	if nTok <= window {
+		return kv
+	}
+	start := (nTok - window) * dKV
+	out := make([]float32, window*dKV)
+	copy(out, kv[start:])
 	return out
 }
 
@@ -504,18 +542,26 @@ func (s *WeightSession) AttnProjGQATrit(qName, kName, vName string, x []float32,
 // pos/base: when base>0 applies RoPE; when base==0 and pos is used with alibi via
 // SessionAttnGQATritAlibi (this path ignores ALiBi — keep rope-or-none semantics).
 func (s *WeightSession) SessionAttnGQATrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
-	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, base, bitplane, false, nil)
+	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, base, bitplane, false, nil, 0)
 }
 
 // SessionAttnGQATritAlibi runs GQA attention with ALiBi bias and no RoPE.
 // slopes=nil uses AlibiSlopes(nHeads). pos is the absolute query position.
+// Full-history (no window).
 func (s *WeightSession) SessionAttnGQATritAlibi(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos float64, bitplane bool, slopes []float32) (y, Knew, Vnew []float32, err error) {
-	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, 0, bitplane, true, slopes)
+	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, 0, bitplane, true, slopes, 0)
+}
+
+// SessionAttnGQATritAlibiWindow is ALiBi GQA with optional sliding window (v1.18).
+// window<=0 → full history (parity with SessionAttnGQATritAlibi).
+func (s *WeightSession) SessionAttnGQATritAlibiWindow(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos float64, bitplane bool, slopes []float32, window int) (y, Knew, Vnew []float32, err error) {
+	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, 0, bitplane, true, slopes, window)
 }
 
 // SessionAttnGQATritPos is the shared body: RoPE when base>0 && !useAlibi;
 // ALiBi when useAlibi (base ignored for rotation).
-func (s *WeightSession) SessionAttnGQATritPos(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool, useAlibi bool, slopes []float32) (y, Knew, Vnew []float32, err error) {
+// window is honored only for ALiBi; window<=0 means full history.
+func (s *WeightSession) SessionAttnGQATritPos(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool, useAlibi bool, slopes []float32, window int) (y, Knew, Vnew []float32, err error) {
 	q, k, v, err := s.AttnProjGQATrit(qName, kName, vName, x, dIn, nHeads, nKVHeads, dh, bitplane)
 	if err != nil {
 		return nil, nil, nil, err
@@ -548,7 +594,7 @@ func (s *WeightSession) SessionAttnGQATritPos(qName, kName, vName, oName string,
 		return nil, nil, nil, err
 	}
 	if useAlibi {
-		biases := AlibiBiases(nHeads, nTok, pos, slopes)
+		biases := AlibiBiasesWindow(nHeads, nTok, pos, slopes, window)
 		y, err = MHAF32Bias(q, Kexp, Vexp, dQ, nHeads, biases)
 	} else {
 		y, err = MHAF32(q, Kexp, Vexp, dQ, nHeads)

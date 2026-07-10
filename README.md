@@ -390,16 +390,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | GQA SwiGLU + multi-token prefill (v1.15) | Gate⊙Up FFN, causal prefill→generate |
 | Tied emb + ALiBi decode (v1.16) | Session embed/logits_tied, ALiBi GQA |
 | Llama GGUF name map (v1.17) | short↔token_embd/blk.N.* adapters |
+| Sliding-window ALiBi (v1.18) | local attention window on ALiBi GQA |
 
-### Acceptance (v1.17)
+### Acceptance (v1.18)
 
-- `go test` green (weights NameMap + interp llama_named demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_llama_named`
-- `./trin run examples/weight_session_llama_named.trin` shows `weight_session_llama_named_ok` / `style=llama` / `gen_text=FFF`
-- Prior v1.16 demos still pass (`weight_session_tied_alibi_ok`)
+- `go test` green (weights AlibiSlidingWindow + interp alibi_window demo)
+- `bash scripts/e2e_native.sh` green including `weight_session_alibi_window`
+- `./trin run examples/weight_session_alibi_window.trin` shows `weight_session_alibi_window_ok` / `window_ok=1` / `gen_text=FFF`
+- Prior v1.17 demos still pass (`weight_session_llama_named_ok`)
 
 ## Next
 
+- v1.18: sliding-window ALiBi residual GQA SwiGLU
 - v1.17: real-layout GGUF name adapters (llama.cpp / HF-style)
 - v1.16: tied emb + ALiBi residual GQA SwiGLU prefill/decode
 - v1.15: multi-token GQA SwiGLU prefill + residual decode
