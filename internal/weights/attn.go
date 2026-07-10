@@ -38,6 +38,12 @@ func RopeF32(x []float32, pos, base float64) []float32 {
 // AttnF32 is single-head attention: y = softmax(q K^T / sqrt(d)) V.
 // K, V layout: nTok * d contiguous rows.
 func AttnF32(q, K, V []float32, d int) ([]float32, error) {
+	return AttnF32Bias(q, K, V, d, nil)
+}
+
+// AttnF32Bias is AttnF32 with an optional per-token additive bias of length nTok
+// (e.g. ALiBi) applied after scale, before softmax. bias=nil skips.
+func AttnF32Bias(q, K, V []float32, d int, bias []float32) ([]float32, error) {
 	if d <= 0 {
 		return nil, fmt.Errorf("attn: d must be > 0")
 	}
@@ -51,6 +57,9 @@ func AttnF32(q, K, V []float32, d int) ([]float32, error) {
 	if nTok == 0 {
 		return make([]float32, d), nil
 	}
+	if bias != nil && len(bias) != nTok {
+		return nil, fmt.Errorf("attn: bias len %d want %d", len(bias), nTok)
+	}
 	scale := 1.0 / math.Sqrt(float64(d))
 	logits := make([]float64, nTok)
 	m := -1e30
@@ -61,6 +70,9 @@ func AttnF32(q, K, V []float32, d int) ([]float32, error) {
 			acc += float64(q[i]) * float64(K[base+i])
 		}
 		logits[t] = acc * scale
+		if bias != nil {
+			logits[t] += float64(bias[t])
+		}
 		if logits[t] > m {
 			m = logits[t]
 		}
@@ -87,11 +99,21 @@ func AttnF32(q, K, V []float32, d int) ([]float32, error) {
 
 // MHAF32 multi-head attention with contiguous head packing (same as interp mha).
 func MHAF32(q, K, V []float32, d, h int) ([]float32, error) {
+	return MHAF32Bias(q, K, V, d, h, nil)
+}
+
+// MHAF32Bias is MHAF32 with optional per-head ALiBi-style bias.
+// biasByHead[h] is length nTok or nil; if the whole slice is nil, no bias.
+func MHAF32Bias(q, K, V []float32, d, h int, biasByHead [][]float32) ([]float32, error) {
 	if h <= 0 || d%h != 0 {
 		return nil, fmt.Errorf("mha: d must be divisible by h")
 	}
 	if h == 1 {
-		return AttnF32(q, K, V, d)
+		var b []float32
+		if len(biasByHead) > 0 {
+			b = biasByHead[0]
+		}
+		return AttnF32Bias(q, K, V, d, b)
 	}
 	dh := d / h
 	nTok := len(K) / d
@@ -112,7 +134,11 @@ func MHAF32(q, K, V []float32, d, h int) ([]float32, error) {
 				Vs[t*dh+i] = V[t*d+head*dh+i]
 			}
 		}
-		yh, err := AttnF32(qs, Ks, Vs, dh)
+		var b []float32
+		if head < len(biasByHead) {
+			b = biasByHead[head]
+		}
+		yh, err := AttnF32Bias(qs, Ks, Vs, dh, b)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +147,64 @@ func MHAF32(q, K, V []float32, d, h int) ([]float32, error) {
 		}
 	}
 	return out, nil
+}
+
+// AlibiSlopes returns nHeads slopes matching the original ALiBi paper:
+// geometric start=2^(-8/nHeads), ratio same.
+func AlibiSlopes(nHeads int) []float32 {
+	if nHeads <= 0 {
+		return nil
+	}
+	// closest power of 2 for base schedule (paper); for small nHeads use nHeads.
+	baseN := nHeads
+	start := math.Pow(2, -8.0/float64(baseN))
+	out := make([]float32, nHeads)
+	s := start
+	for i := 0; i < nHeads; i++ {
+		out[i] = float32(s)
+		s *= start
+	}
+	return out
+}
+
+// AlibiBias builds length-nTok bias for one head: bias[t] = -slope * (qPos - t)
+// for t=0..nTok-1, where t is absolute key position starting at (qPos-nTok+1).
+// When past grows left-to-right with absolute positions 0..qPos, key at index t
+// has position t if nTok == qPos+1 (full causal from 0). General form uses
+// keyPos = qPos - (nTok-1) + t.
+func AlibiBias(nTok int, qPos, slope float64) []float32 {
+	if nTok <= 0 {
+		return nil
+	}
+	out := make([]float32, nTok)
+	// key positions: oldest = qPos-(nTok-1), newest = qPos
+	start := qPos - float64(nTok-1)
+	for t := 0; t < nTok; t++ {
+		keyPos := start + float64(t)
+		// standard ALiBi uses relative distance (q-k) with negative slope*dist
+		dist := qPos - keyPos // >= 0 for causal past
+		out[t] = float32(-slope * dist)
+	}
+	return out
+}
+
+// AlibiBiases builds per-head bias rows for MHA.
+func AlibiBiases(nHeads, nTok int, qPos float64, slopes []float32) [][]float32 {
+	if nHeads <= 0 || nTok <= 0 {
+		return nil
+	}
+	if slopes == nil {
+		slopes = AlibiSlopes(nHeads)
+	}
+	out := make([][]float32, nHeads)
+	for h := 0; h < nHeads; h++ {
+		sl := 0.0
+		if h < len(slopes) {
+			sl = float64(slopes[h])
+		}
+		out[h] = AlibiBias(nTok, qPos, sl)
+	}
+	return out
 }
 
 // AttnProj fuses Q/K/V projections: each weight is dOut×dIn row-major.
@@ -417,14 +501,28 @@ func (s *WeightSession) AttnProjGQATrit(qName, kName, vName string, x []float32,
 }
 
 // SessionAttnGQATrit is SessionAttnGQA with trit-cached projections (+ optional O).
+// pos/base: when base>0 applies RoPE; when base==0 and pos is used with alibi via
+// SessionAttnGQATritAlibi (this path ignores ALiBi — keep rope-or-none semantics).
 func (s *WeightSession) SessionAttnGQATrit(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, base, bitplane, false, nil)
+}
+
+// SessionAttnGQATritAlibi runs GQA attention with ALiBi bias and no RoPE.
+// slopes=nil uses AlibiSlopes(nHeads). pos is the absolute query position.
+func (s *WeightSession) SessionAttnGQATritAlibi(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos float64, bitplane bool, slopes []float32) (y, Knew, Vnew []float32, err error) {
+	return s.SessionAttnGQATritPos(qName, kName, vName, oName, x, Kpast, Vpast, dIn, nHeads, nKVHeads, dh, pos, 0, bitplane, true, slopes)
+}
+
+// SessionAttnGQATritPos is the shared body: RoPE when base>0 && !useAlibi;
+// ALiBi when useAlibi (base ignored for rotation).
+func (s *WeightSession) SessionAttnGQATritPos(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos, base float64, bitplane bool, useAlibi bool, slopes []float32) (y, Knew, Vnew []float32, err error) {
 	q, k, v, err := s.AttnProjGQATrit(qName, kName, vName, x, dIn, nHeads, nKVHeads, dh, bitplane)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	dQ := nHeads * dh
 	dKV := nKVHeads * dh
-	if base > 0 {
+	if !useAlibi && base > 0 {
 		q = ropeHeads(q, nHeads, dh, pos, base)
 		k = ropeHeads(k, nKVHeads, dh, pos, base)
 	}
@@ -449,7 +547,12 @@ func (s *WeightSession) SessionAttnGQATrit(qName, kName, vName, oName string, x,
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	y, err = MHAF32(q, Kexp, Vexp, dQ, nHeads)
+	if useAlibi {
+		biases := AlibiBiases(nHeads, nTok, pos, slopes)
+		y, err = MHAF32Bias(q, Kexp, Vexp, dQ, nHeads, biases)
+	} else {
+		y, err = MHAF32(q, Kexp, Vexp, dQ, nHeads)
+	}
 	if err != nil {
 		return nil, nil, nil, err
 	}

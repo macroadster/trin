@@ -1,0 +1,142 @@
+//go:build ignore
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/ericchien/trin/internal/weights"
+)
+
+// Writes demos/weights/tiny_tied_alibi.gguf — 2-layer GQA + SwiGLU + tied emb + ALiBi.
+// vocab=8 dim=4 nHeads=2 nKV=1 dh=2 hidden=8; tok_emb doubles as lm_head (tied).
+
+func main() {
+	root := "."
+	if len(os.Args) > 1 {
+		root = os.Args[1]
+	}
+	out := filepath.Join(root, "demos/weights/tiny_tied_alibi.gguf")
+	vocabPath := filepath.Join(root, "demos/weights/tiny_llm.vocab")
+
+	// Make F token (idx 6) unique so tied greedy decode is stable.
+	tokEmb := []float32{
+		0.1, 0.0, 0.0, 0.0, // 0 pad
+		1.0, 0.2, 0.0, 0.1, // 1 A
+		0.0, 1.0, 0.1, 0.0, // 2 B
+		0.2, 0.0, 1.0, 0.0, // 3 C
+		0.0, 0.1, 0.0, 1.0, // 4 D
+		0.5, 0.5, 0.0, 0.0, // 5 E
+		2.0, 2.0, 2.0, 2.0, // 6 F — large so tied logits favor F after residual
+		0.0, 0.0, 0.0, 0.5, // 7 eos
+	}
+	I4 := []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	k0 := []float32{
+		1.0, 0.1, 0.0, 0.0,
+		0.0, 1.0, 0.1, 0.0,
+	}
+	v0 := []float32{
+		0.8, 0.0, 0.1, 0.0,
+		0.0, 0.8, 0.0, 0.1,
+	}
+	gate0 := []float32{
+		1, 0, 0, 0.05,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0.05, 0, 0, 1,
+		0.5, 0.5, 0.0, 0.0,
+		0.0, 0.5, 0.5, 0.0,
+		0.0, 0.0, 0.5, 0.5,
+		0.5, 0.0, 0.0, 0.5,
+	}
+	up0 := gate0
+	down0 := []float32{
+		1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.5,
+		0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0,
+		0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.0,
+		0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.5,
+	}
+	q1 := []float32{
+		0.9, 0, 0, 0,
+		0, 0.9, 0, 0,
+		0, 0, 0.9, 0,
+		0, 0, 0, 0.9,
+	}
+	k1 := []float32{
+		1.0, 0.0, 0.0, 0.05,
+		0.0, 1.0, 0.05, 0.0,
+	}
+	v1 := []float32{
+		0.75, 0, 0.05, 0,
+		0, 0.75, 0, 0.05,
+	}
+	gate1 := []float32{
+		0.9, 0, 0, 0,
+		0, 0.9, 0, 0,
+		0, 0, 0.9, 0,
+		0, 0, 0, 0.9,
+		0.25, 0.25, 0, 0,
+		0, 0.25, 0.25, 0,
+		0, 0, 0.25, 0.25,
+		0.25, 0, 0, 0.25,
+	}
+	up1 := gate1
+	down1 := []float32{
+		0.5, 0, 0, 0, 0.25, 0, 0, 0.25,
+		0, 0.5, 0, 0, 0, 0.25, 0, 0,
+		0, 0, 0.5, 0, 0, 0, 0.25, 0,
+		0, 0, 0, 0.5, 0.25, 0, 0, 0.25,
+	}
+	g := []float32{1, 1, 1, 1}
+
+	tensors := map[string][]float32{
+		"tok_emb": tokEmb,
+		"L0_q":    I4, "L0_k": k0, "L0_v": v0, "L0_o": I4,
+		"L0_gate": gate0, "L0_up": up0, "L0_down": down0, "L0_an": g, "L0_fn": g,
+		"L1_q": q1, "L1_k": k1, "L1_v": v1, "L1_o": I4,
+		"L1_gate": gate1, "L1_up": up1, "L1_down": down1, "L1_an": g, "L1_fn": g,
+		"final_norm": g,
+		// no separate lm_head — tied to tok_emb
+	}
+	shapes := map[string][]uint64{
+		"tok_emb": {8, 4},
+		"L0_q":    {4, 4}, "L0_k": {2, 4}, "L0_v": {2, 4}, "L0_o": {4, 4},
+		"L0_gate": {8, 4}, "L0_up": {8, 4}, "L0_down": {4, 8}, "L0_an": {4}, "L0_fn": {4},
+		"L1_q": {4, 4}, "L1_k": {2, 4}, "L1_v": {2, 4}, "L1_o": {4, 4},
+		"L1_gate": {8, 4}, "L1_up": {8, 4}, "L1_down": {4, 8}, "L1_an": {4}, "L1_fn": {4},
+		"final_norm": {4},
+	}
+	meta := map[string]string{
+		"general.name":         "trin-tiny-tied-alibi",
+		"general.architecture": "trin_tiny_tied_alibi",
+		"trin.vocab_size":      "8",
+		"trin.dim":             "4",
+		"trin.hidden":          "8",
+		"trin.n_heads":         "2",
+		"trin.n_kv":            "1",
+		"trin.dh":              "2",
+		"trin.n_layers":        "2",
+		"trin.ffn":             "swiglu",
+		"trin.pos":             "alibi",
+		"trin.tied_emb":        "1",
+		"tokenizer.ggml.model": "trin_char",
+	}
+	if err := weights.WriteGGUFF32(out, tensors, shapes, meta); err != nil {
+		panic(err)
+	}
+	if _, err := os.Stat(vocabPath); err != nil {
+		vocab := "<pad>\nA\nB\nC\nD\nE\nF\n<eos>\n"
+		if err := os.WriteFile(vocabPath, []byte(vocab), 0o644); err != nil {
+			panic(err)
+		}
+		fmt.Println("wrote", vocabPath)
+	}
+	fmt.Println("wrote", out)
+}

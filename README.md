@@ -388,16 +388,18 @@ greedily decodes three tokens on CPU (no CUDA).
 | Multi-layer GGUF decode via stack (v1.13) | 2-layer greedy decode, growing layer-major KV |
 | Multi-layer GQA stack + final-norm (v1.14) | Compact KV flats, residual GQA, final RMSNorm |
 | GQA SwiGLU + multi-token prefill (v1.15) | Gate⊙Up FFN, causal prefill→generate |
+| Tied emb + ALiBi decode (v1.16) | Session embed/logits_tied, ALiBi GQA |
 
-### Acceptance (v1.15)
+### Acceptance (v1.16)
 
-- `go test` green (weights SwiGLU/prefill + interp prefill demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_gqa_swiglu_prefill`
-- `./trin run examples/weight_session_gqa_swiglu_prefill.trin` shows `weight_session_gqa_swiglu_prefill_ok` / `parity_prefill_ok=1` / `gen_text=FFF`
-- Prior v1.14 demos still pass (`tiny_gguf_decode_gqa_trit_ok`)
+- `go test` green (weights Alibi/Tied + interp tied_alibi demo)
+- `bash scripts/e2e_native.sh` green including `weight_session_tied_alibi`
+- `./trin run examples/weight_session_tied_alibi.trin` shows `weight_session_tied_alibi_ok` / `emb_ok=1` / `tied_match=1` / `gen_text=FFF`
+- Prior v1.15 demos still pass (`weight_session_gqa_swiglu_prefill_ok`)
 
 ## Next
 
+- v1.16: tied emb + ALiBi residual GQA SwiGLU prefill/decode
 - v1.15: multi-token GQA SwiGLU prefill + residual decode
 - v1.14: multi-layer residual GQA stack + final RMSNorm decode
 - v1.13: multi-layer GGUF greedy decode on trit-attn stack

@@ -1002,3 +1002,164 @@ func TestGQASwiGLUStackAndPrefill(t *testing.T) {
 		t.Fatal("bad xs")
 	}
 }
+
+func TestAlibiAndTiedEmbed(t *testing.T) {
+	sl := AlibiSlopes(2)
+	if len(sl) != 2 || sl[0] <= 0 || sl[1] <= 0 || sl[1] >= sl[0] {
+		t.Fatalf("slopes %v", sl)
+	}
+	b := AlibiBias(3, 2, 1.0) // qPos=2, nTok=3 → dist 2,1,0
+	if !near(b[0], -2) || !near(b[1], -1) || !near(b[2], 0) {
+		t.Fatalf("bias %v", b)
+	}
+	// bias affects softmax: favor newer tokens
+	q := []float32{1, 0}
+	K := []float32{1, 0, 1, 0} // 2 toks identical
+	V := []float32{1, 0, 0, 1}
+	plain, err := AttnF32(q, K, V, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// plain equal weights → average of V rows
+	if !near(plain[0], 0.5) || !near(plain[1], 0.5) {
+		t.Fatalf("plain %v", plain)
+	}
+	biased, err := AttnF32Bias(q, K, V, 2, []float32{-10, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// heavy bias against first → nearly second V
+	if biased[0] > 0.1 || biased[1] < 0.9 {
+		t.Fatalf("biased %v", biased)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tied.gguf")
+	// vocab=4 dim=2 emb; also Q/K/V for alibi smoke
+	emb := []float32{
+		1, 0,
+		0, 1,
+		1, 1,
+		0.5, 0.5,
+	}
+	I2 := []float32{1, 0, 0, 1}
+	// K/V 1×2 for nKV=1 dh=2 nHeads=1 dim=2 → wait dim must = nHeads*dh
+	// use nHeads=2 nKV=1 dh=1 dim=2
+	Q := []float32{1, 0, 0, 1} // 2×2
+	Kmat := []float32{1, 0}    // 1×2
+	Vmat := []float32{0, 1}
+	g := []float32{1, 1}
+	tensors := map[string][]float32{
+		"tok_emb": emb,
+		"Q":       Q, "K": Kmat, "V": Vmat, "O": I2,
+		"gate": I2, "up": I2, "down": I2, "an": g, "fn": g,
+		"final_norm": g,
+	}
+	shapes := map[string][]uint64{
+		"tok_emb": {4, 2},
+		"Q":       {2, 2}, "K": {1, 2}, "V": {1, 2}, "O": {2, 2},
+		"gate": {2, 2}, "up": {2, 2}, "down": {2, 2}, "an": {2}, "fn": {2},
+		"final_norm": {2},
+	}
+	if err := WriteGGUFF32(path, tensors, shapes, map[string]string{"general.name": "tied"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSession(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CloseSession(s.ID)
+
+	row, err := s.EmbedRow("tok_emb", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(row[0], 1) || !near(row[1], 1) {
+		t.Fatalf("embed %v", row)
+	}
+	if _, err := s.EmbedRow("tok_emb", 9, 2); err == nil {
+		t.Fatal("oob")
+	}
+	h := []float32{1, 0}
+	logits, err := s.LogitsTied("tok_emb", h, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// dots with emb rows: 1,0,1,0.5
+	want := []float32{1, 0, 1, 0.5}
+	for i := range want {
+		if !near(logits[i], want[i]) {
+			t.Fatalf("logits %v want %v", logits, want)
+		}
+	}
+	if _, _, err := s.PrepackTritCSV("tok_emb,Q,K,V,O,gate,up,down", 2); err != nil {
+		t.Fatal(err)
+	}
+	// trit path is absmean-quantized — check shape + argmax parity only
+	lt, err := s.LogitsTiedTrit("tok_emb", h, 2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lt) != len(want) {
+		t.Fatalf("logits_trit len %d", len(lt))
+	}
+	argmax := func(xs []float32) int {
+		bi := 0
+		for i := 1; i < len(xs); i++ {
+			if xs[i] > xs[bi] {
+				bi = i
+			}
+		}
+		return bi
+	}
+	// tokens 0 and 2 both score 1.0 on f32 path; trit may break the tie
+	if argmax(lt) != 0 && argmax(lt) != 2 {
+		t.Fatalf("logits_trit argmax %d vals %v", argmax(lt), lt)
+	}
+
+	// ALiBi stack single step
+	dim, hidden := 2, 2
+	nHeads, nKV, dh := 2, 1, 1
+	x := []float32{1, 0}
+	spec := AttnLayerSpec{Q: "Q", K: "K", V: "V", O: "O", Gate: "gate", Up: "up", Down: "down", AttnGain: "an", FFNGain: "fn", Hidden: hidden}
+	y0, k0, v0, err := s.ForwardGQASwiGLUBlockTritAlibi(spec, x, nil, nil, dim, nHeads, nKV, dh, 0, true, 1e-6, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(y0) != dim || len(k0) != nKV*dh {
+		t.Fatalf("shapes y=%d k=%d", len(y0), len(k0))
+	}
+	y1, k1, v1, err := s.ForwardGQASwiGLUBlockTritAlibi(spec, x, k0, v0, dim, nHeads, nKV, dh, 1, true, 1e-6, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(k1) != 2*nKV*dh || len(v1) != 2*nKV*dh {
+		t.Fatalf("kv grow %d", len(k1))
+	}
+	// CSV prefill path
+	xs := append(append([]float32{}, x...), x...)
+	Yf, kP, vP, yLast, err := s.PrefillGQASwiGLUStackTritAlibiCSV(
+		"Q", "K", "V", "O", "gate", "up", "down", "an", "fn",
+		xs, nil, nil, dim, hidden, nHeads, nKV, dh, 0, true, 1e-6,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(Yf) != 2*dim || len(kP) != 2*nKV*dh || len(vP) != 2*nKV*dh {
+		t.Fatalf("prefill shapes")
+	}
+	for i := 0; i < dim; i++ {
+		if !near(yLast[i], Yf[dim+i]) {
+			t.Fatalf("yLast")
+		}
+	}
+	// tied logits on yLast
+	lg, err := s.LogitsTiedTrit("tok_emb", yLast, dim, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lg) != 4 {
+		t.Fatalf("vocab logits %d", len(lg))
+	}
+	_ = y1
+}

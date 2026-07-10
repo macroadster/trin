@@ -941,3 +941,285 @@ func (s *WeightSession) PrefillGQASwiGLUStackTritCSV(
 	copy(yLast, y)
 	return Yflat, KnewFlat, VnewFlat, yLast, nil
 }
+
+// --- v1.16 tied embeddings + ALiBi residual decode ---
+
+// EmbedRow loads one token row from a V×dim row-major emb tensor.
+func (s *WeightSession) EmbedRow(name string, idx, dim int) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 {
+		return nil, fmt.Errorf("embed_row: bad dim")
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("embed_row: negative idx")
+	}
+	nElem, _, err := s.tensorNElem(name)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("embed_row: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	if idx >= V {
+		return nil, fmt.Errorf("embed_row: idx %d OOB vocab %d", idx, V)
+	}
+	return s.LoadF32Window(name, idx*dim, dim)
+}
+
+// LogitsTied computes logits = E @ h for tied embedding table E (vocab×dim
+// row-major). Equivalent to lm_head = E^T when E is stored as rows = tokens.
+func (s *WeightSession) LogitsTied(embName string, h []float32, dim int) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(h) < dim {
+		return nil, fmt.Errorf("logits_tied: bad dim")
+	}
+	nElem, _, err := s.tensorNElem(embName)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("logits_tied: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	// y[v] = sum_d E[v,d] * h[d] — use Linear with M=V K=dim
+	return s.Linear(embName, h[:dim], V, dim, 0)
+}
+
+// LogitsTiedTrit is LogitsTied via trit-cached linear (auto-prepack emb rows).
+func (s *WeightSession) LogitsTiedTrit(embName string, h []float32, dim int, bitplane bool) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(h) < dim {
+		return nil, fmt.Errorf("logits_tied_trit: bad dim")
+	}
+	nElem, _, err := s.tensorNElem(embName)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("logits_tied_trit: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	y, _, err := s.LinearTritCached(embName, h[:dim], V, dim, bitplane)
+	return y, err
+}
+
+// ForwardGQASwiGLUBlockTritAlibi is ForwardGQASwiGLUBlockTrit with ALiBi (no RoPE).
+func (s *WeightSession) ForwardGQASwiGLUBlockTritAlibi(
+	spec AttnLayerSpec,
+	x, Kpast, Vpast []float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+	slopes []float32,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: bad dim")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: bad heads")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: nHeads must be multiple of nKVHeads")
+	}
+	if nHeads*dh != dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: dim=%d != nHeads*dh=%d", dim, nHeads*dh)
+	}
+	if spec.Q == "" || spec.K == "" || spec.V == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: Q/K/V required")
+	}
+	if spec.Gate == "" || spec.Up == "" || spec.Down == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: Gate/Up/Down required")
+	}
+	if spec.Hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: hidden must be > 0")
+	}
+	xIn := x[:dim]
+	attnGain, err := s.loadGain(spec.AttnGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi attn gain %q: %w", spec.AttnGain, err)
+	}
+	xn := RMSNormF32(xIn, eps, attnGain)
+	a, Knew, Vnew, err := s.SessionAttnGQATritAlibi(
+		spec.Q, spec.K, spec.V, spec.O,
+		xn, Kpast, Vpast,
+		dim, nHeads, nKVHeads, dh, pos, bitplane, slopes,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi attn: %w", err)
+	}
+	if len(a) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: attn out len %d < dim %d", len(a), dim)
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	ffnGain, err := s.loadGain(spec.FFNGain, dim)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi ffn gain %q: %w", spec.FFNGain, err)
+	}
+	hn := RMSNormF32(hRes, eps, ffnGain)
+	gate, _, err := s.LinearTritCached(spec.Gate, hn, spec.Hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi gate %q: %w", spec.Gate, err)
+	}
+	up, _, err := s.LinearTritCached(spec.Up, hn, spec.Hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi up %q: %w", spec.Up, err)
+	}
+	act, err := SwiGLUF32(gate, up)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi swiglu: %w", err)
+	}
+	down, _, err := s.LinearTritCached(spec.Down, act, dim, spec.Hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi down %q: %w", spec.Down, err)
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+// GQASwiGLUStackTritAlibi chains ALiBi SwiGLU GQA blocks.
+func (s *WeightSession) GQASwiGLUStackTritAlibi(
+	layers []AttnLayerSpec,
+	x []float32,
+	Kpasts, Vpasts [][]float32,
+	dim, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+	slopes []float32,
+) (y []float32, Knews, Vnews [][]float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if len(layers) == 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: empty layers")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews = make([][]float32, len(layers))
+	Vnews = make([][]float32, len(layers))
+	for i, spec := range layers {
+		var kp, vp []float32
+		if i < len(Kpasts) {
+			kp = Kpasts[i]
+		}
+		if i < len(Vpasts) {
+			vp = Vpasts[i]
+		}
+		next, kn, vn, e := s.ForwardGQASwiGLUBlockTritAlibi(spec, cur, kp, vp, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, slopes)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, Knews, Vnews, nil
+}
+
+// GQASwiGLUStackTritAlibiCSV is the language surface for ALiBi SwiGLU GQA.
+func (s *WeightSession) GQASwiGLUStackTritAlibiCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: bad heads")
+	}
+	layers, err := parseGQASwiGLULayers(qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV, hidden)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dKV := nKVHeads * dh
+	n := len(layers)
+	Kpasts, err := SplitLayerKV(KpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := SplitLayerKV(VpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y, Knews, Vnews, err := s.GQASwiGLUStackTritAlibi(layers, x, Kpasts, Vpasts, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return y, FlattenLayerKV(Knews), FlattenLayerKV(Vnews), nil
+}
+
+// PrefillGQASwiGLUStackTritAlibiCSV multi-token sequential ALiBi prefill.
+func (s *WeightSession) PrefillGQASwiGLUStackTritAlibiCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	xs, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	startPos float64,
+	bitplane bool,
+	eps float64,
+) (Yflat, KnewFlat, VnewFlat, yLast []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi: bad dim")
+	}
+	if len(xs) == 0 || len(xs)%dim != 0 {
+		return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi: xs len %d not multiple of dim %d", len(xs), dim)
+	}
+	nTok := len(xs) / dim
+	layers, err := parseGQASwiGLULayers(qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV, hidden)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi: bad heads")
+	}
+	dKV := nKVHeads * dh
+	n := len(layers)
+	Kpasts, err := SplitLayerKV(KpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	Vpasts, err := SplitLayerKV(VpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	Yflat = make([]float32, 0, nTok*dim)
+	kCur, vCur := Kpasts, Vpasts
+	var y []float32
+	for t := 0; t < nTok; t++ {
+		x := xs[t*dim : (t+1)*dim]
+		pos := startPos + float64(t)
+		y, kCur, vCur, err = s.GQASwiGLUStackTritAlibi(layers, x, kCur, vCur, dim, nHeads, nKVHeads, dh, pos, bitplane, eps, nil)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi token %d: %w", t, err)
+		}
+		Yflat = append(Yflat, y...)
+	}
+	KnewFlat = FlattenLayerKV(kCur)
+	VnewFlat = FlattenLayerKV(vCur)
+	yLast = make([]float32, dim)
+	copy(yLast, y)
+	return Yflat, KnewFlat, VnewFlat, yLast, nil
+}

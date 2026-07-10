@@ -10328,6 +10328,467 @@ func (s *weightSess) prefillGQASwiGLUStackTritCSV(
 }
 
 
+// --- v1.16 tied emb + ALiBi (codegen runtime helpers) ---
+
+func (s *weightSess) tensorNElem(name string) (int, error) {
+	sh, err := s.shape(name)
+	if err != nil {
+		return 0, err
+	}
+	n := 1
+	for _, d := range sh {
+		if d <= 0 {
+			return 0, fmt.Errorf("tensor %q zero/neg dim", name)
+		}
+		n *= int(d)
+	}
+	return n, nil
+}
+
+func (s *weightSess) embedRow(name string, idx, dim int) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 {
+		return nil, fmt.Errorf("embed_row: bad dim")
+	}
+	if idx < 0 {
+		return nil, fmt.Errorf("embed_row: negative idx")
+	}
+	nElem, err := s.tensorNElem(name)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("embed_row: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	if idx >= V {
+		return nil, fmt.Errorf("embed_row: idx %d OOB vocab %d", idx, V)
+	}
+	return s.loadF32Window(name, idx*dim, dim)
+}
+
+func (s *weightSess) logitsTied(embName string, h []float32, dim int) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(h) < dim {
+		return nil, fmt.Errorf("logits_tied: bad dim")
+	}
+	nElem, err := s.tensorNElem(embName)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("logits_tied: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	return s.linear(embName, h[:dim], V, dim, 0)
+}
+
+func (s *weightSess) logitsTiedTrit(embName string, h []float32, dim int, bitplane bool) ([]float32, error) {
+	if s == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(h) < dim {
+		return nil, fmt.Errorf("logits_tied_trit: bad dim")
+	}
+	nElem, err := s.tensorNElem(embName)
+	if err != nil {
+		return nil, err
+	}
+	if nElem%dim != 0 {
+		return nil, fmt.Errorf("logits_tied_trit: nElem=%d not divisible by dim=%d", nElem, dim)
+	}
+	V := nElem / dim
+	y, _, err := s.linearTritCached(embName, h[:dim], V, dim, bitplane)
+	return y, err
+}
+
+func alibiSlopes(nHeads int) []float32 {
+	if nHeads <= 0 {
+		return nil
+	}
+	start := math.Pow(2, -8.0/float64(nHeads))
+	out := make([]float32, nHeads)
+	s := start
+	for i := 0; i < nHeads; i++ {
+		out[i] = float32(s)
+		s *= start
+	}
+	return out
+}
+
+func alibiBias(nTok int, qPos, slope float64) []float32 {
+	if nTok <= 0 {
+		return nil
+	}
+	out := make([]float32, nTok)
+	start := qPos - float64(nTok-1)
+	for t := 0; t < nTok; t++ {
+		keyPos := start + float64(t)
+		dist := qPos - keyPos
+		out[t] = float32(-slope * dist)
+	}
+	return out
+}
+
+func alibiBiases(nHeads, nTok int, qPos float64, slopes []float32) [][]float32 {
+	if nHeads <= 0 || nTok <= 0 {
+		return nil
+	}
+	if slopes == nil {
+		slopes = alibiSlopes(nHeads)
+	}
+	out := make([][]float32, nHeads)
+	for h := 0; h < nHeads; h++ {
+		sl := 0.0
+		if h < len(slopes) {
+			sl = float64(slopes[h])
+		}
+		out[h] = alibiBias(nTok, qPos, sl)
+	}
+	return out
+}
+
+func attnF32Bias(q, K, V []float32, d int, bias []float32) ([]float32, error) {
+	if d <= 0 {
+		return nil, fmt.Errorf("attn: d must be > 0")
+	}
+	if len(q) < d {
+		return nil, fmt.Errorf("attn: q short")
+	}
+	nTok := len(K) / d
+	if nTok*d != len(K) || len(V) < nTok*d {
+		return nil, fmt.Errorf("attn: K/V dimension mismatch")
+	}
+	if nTok == 0 {
+		return make([]float32, d), nil
+	}
+	if bias != nil && len(bias) != nTok {
+		return nil, fmt.Errorf("attn: bias len %d want %d", len(bias), nTok)
+	}
+	scale := 1.0 / math.Sqrt(float64(d))
+	logits := make([]float64, nTok)
+	m := -1e30
+	for t := 0; t < nTok; t++ {
+		acc := 0.0
+		base := t * d
+		for i := 0; i < d; i++ {
+			acc += float64(q[i]) * float64(K[base+i])
+		}
+		logits[t] = acc * scale
+		if bias != nil {
+			logits[t] += float64(bias[t])
+		}
+		if logits[t] > m {
+			m = logits[t]
+		}
+	}
+	sum := 0.0
+	for t := 0; t < nTok; t++ {
+		logits[t] = math.Exp(logits[t] - m)
+		sum += logits[t]
+	}
+	out := make([]float32, d)
+	if sum == 0 {
+		return out, nil
+	}
+	inv := 1.0 / sum
+	for t := 0; t < nTok; t++ {
+		p := logits[t] * inv
+		base := t * d
+		for i := 0; i < d; i++ {
+			out[i] += float32(p * float64(V[base+i]))
+		}
+	}
+	return out, nil
+}
+
+func mhaF32Bias(q, K, V []float32, d, h int, biasByHead [][]float32) ([]float32, error) {
+	if h <= 0 || d%h != 0 {
+		return nil, fmt.Errorf("mha: d must be divisible by h")
+	}
+	if h == 1 {
+		var b []float32
+		if len(biasByHead) > 0 {
+			b = biasByHead[0]
+		}
+		return attnF32Bias(q, K, V, d, b)
+	}
+	dh := d / h
+	nTok := len(K) / d
+	if nTok*d != len(K) || len(V) < nTok*d || len(q) < d {
+		return nil, fmt.Errorf("mha: dimension mismatch")
+	}
+	out := make([]float32, d)
+	for head := 0; head < h; head++ {
+		qs := make([]float32, dh)
+		for i := 0; i < dh; i++ {
+			qs[i] = q[head*dh+i]
+		}
+		Ks := make([]float32, nTok*dh)
+		Vs := make([]float32, nTok*dh)
+		for t := 0; t < nTok; t++ {
+			for i := 0; i < dh; i++ {
+				Ks[t*dh+i] = K[t*d+head*dh+i]
+				Vs[t*dh+i] = V[t*d+head*dh+i]
+			}
+		}
+		var b []float32
+		if head < len(biasByHead) {
+			b = biasByHead[head]
+		}
+		yh, err := attnF32Bias(qs, Ks, Vs, dh, b)
+		if err != nil {
+			return nil, err
+		}
+		for i := 0; i < dh; i++ {
+			out[head*dh+i] = yh[i]
+		}
+	}
+	return out, nil
+}
+
+func (s *weightSess) sessionAttnGQATritAlibi(qName, kName, vName, oName string, x, Kpast, Vpast []float32, dIn, nHeads, nKVHeads, dh int, pos float64, bitplane bool) (y, Knew, Vnew []float32, err error) {
+	q, k, v, err := s.attnProjGQATrit(qName, kName, vName, x, dIn, nHeads, nKVHeads, dh, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dQ := nHeads * dh
+	dKV := nKVHeads * dh
+	if len(Kpast)%dKV != 0 || len(Vpast)%dKV != 0 {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past KV not multiple of dKV=%d", dKV)
+	}
+	if len(Kpast) != len(Vpast) {
+		return nil, nil, nil, fmt.Errorf("session_gqa_trit: past K/V length mismatch")
+	}
+	Knew = make([]float32, 0, len(Kpast)+dKV)
+	Vnew = make([]float32, 0, len(Vpast)+dKV)
+	Knew = append(Knew, Kpast...)
+	Knew = append(Knew, k...)
+	Vnew = append(Vnew, Vpast...)
+	Vnew = append(Vnew, v...)
+	nTok := len(Knew) / dKV
+	Kexp, err := gqaExpandKV(Knew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vexp, err := gqaExpandKV(Vnew, nTok, nKVHeads, nHeads, dh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	biases := alibiBiases(nHeads, nTok, pos, nil)
+	y, err = mhaF32Bias(q, Kexp, Vexp, dQ, nHeads, biases)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if oName != "" {
+		y, _, err = s.linearTritCached(oName, y, dQ, dQ, bitplane)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("session_gqa_trit O %q: %w", oName, err)
+		}
+	}
+	return y, Knew, Vnew, nil
+}
+
+func (s *weightSess) forwardGQASwiGLUBlockTritAlibi(
+	qName, kName, vName, oName, gateName, upName, downName, attnGain, ffnGain string,
+	x, Kpast, Vpast []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+) (y, Knew, Vnew []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: bad dim")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: bad heads")
+	}
+	if nHeads%nKVHeads != 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: nHeads must be multiple of nKVHeads")
+	}
+	if nHeads*dh != dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: dim=%d != nHeads*dh=%d", dim, nHeads*dh)
+	}
+	if qName == "" || kName == "" || vName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: Q/K/V required")
+	}
+	if gateName == "" || upName == "" || downName == "" {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: Gate/Up/Down required")
+	}
+	if hidden <= 0 {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: hidden must be > 0")
+	}
+	xIn := x[:dim]
+	ag, err := s.loadGain(attnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	xn := rmsNormF32(xIn, eps, ag)
+	a, Knew, Vnew, err := s.sessionAttnGQATritAlibi(qName, kName, vName, oName, xn, Kpast, Vpast, dim, nHeads, nKVHeads, dh, pos, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(a) < dim {
+		return nil, nil, nil, fmt.Errorf("forward_gqa_swiglu_alibi: attn out len %d < dim %d", len(a), dim)
+	}
+	hRes := make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		hRes[i] = xIn[i] + a[i]
+	}
+	fg, err := s.loadGain(ffnGain, dim)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	hn := rmsNormF32(hRes, eps, fg)
+	gate, _, err := s.linearTritCached(gateName, hn, hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	up, _, err := s.linearTritCached(upName, hn, hidden, dim, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	act, err := swiGLUF32(gate, up)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	down, _, err := s.linearTritCached(downName, act, dim, hidden, bitplane)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	y = make([]float32, dim)
+	for i := 0; i < dim; i++ {
+		y[i] = hRes[i] + down[i]
+	}
+	return y, Knew, Vnew, nil
+}
+
+func (s *weightSess) gqaSwiGLUStackTritAlibiCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	x, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	pos float64,
+	bitplane bool,
+	eps float64,
+) (y, KnewFlat, VnewFlat []float32, err error) {
+	split := func(s string) []string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	qs := split(qCSV)
+	ks := split(kCSV)
+	vs := split(vCSV)
+	os_ := split(oCSV)
+	gates := split(gateCSV)
+	ups := split(upCSV)
+	downs := split(downCSV)
+	ag := split(attnGainCSV)
+	fg := split(ffnGainCSV)
+	n := len(qs)
+	if n == 0 || len(ks) != n || len(vs) != n || len(gates) != n || len(ups) != n || len(downs) != n {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: Q/K/V/Gate/Up/Down CSVs must share non-zero length")
+	}
+	if nHeads <= 0 || nKVHeads <= 0 || dh <= 0 {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: bad heads")
+	}
+	dKV := nKVHeads * dh
+	Kpasts, err := splitLayerKV(KpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	Vpasts, err := splitLayerKV(VpastFlat, n, dKV)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if dim <= 0 || len(x) < dim {
+		return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi: bad dim")
+	}
+	cur := make([]float32, dim)
+	copy(cur, x[:dim])
+	Knews := make([][]float32, n)
+	Vnews := make([][]float32, n)
+	for i := 0; i < n; i++ {
+		oName, aGain, fGain := "", "", ""
+		if i < len(os_) {
+			oName = os_[i]
+		}
+		if i < len(ag) {
+			aGain = ag[i]
+		}
+		if i < len(fg) {
+			fGain = fg[i]
+		}
+		next, kn, vn, e := s.forwardGQASwiGLUBlockTritAlibi(
+			qs[i], ks[i], vs[i], oName, gates[i], ups[i], downs[i], aGain, fGain,
+			cur, Kpasts[i], Vpasts[i], dim, hidden, nHeads, nKVHeads, dh, pos, bitplane, eps,
+		)
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("gqa_swiglu_stack_alibi layer %d: %w", i, e)
+		}
+		cur = next
+		Knews[i] = kn
+		Vnews[i] = vn
+	}
+	return cur, flattenLayerKV(Knews), flattenLayerKV(Vnews), nil
+}
+
+func (s *weightSess) prefillGQASwiGLUStackTritAlibiCSV(
+	qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV string,
+	xs, KpastFlat, VpastFlat []float32,
+	dim, hidden, nHeads, nKVHeads, dh int,
+	startPos float64,
+	bitplane bool,
+	eps float64,
+) (Yflat, KnewFlat, VnewFlat, yLast []float32, err error) {
+	if s == nil {
+		return nil, nil, nil, nil, fmt.Errorf("nil session")
+	}
+	if dim <= 0 {
+		return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi: bad dim")
+	}
+	if len(xs) == 0 || len(xs)%dim != 0 {
+		return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi: xs len %d not multiple of dim %d", len(xs), dim)
+	}
+	nTok := len(xs) / dim
+	Yflat = make([]float32, 0, nTok*dim)
+	kCur, vCur := KpastFlat, VpastFlat
+	var y []float32
+	for t := 0; t < nTok; t++ {
+		x := xs[t*dim : (t+1)*dim]
+		pos := startPos + float64(t)
+		y, kCur, vCur, err = s.gqaSwiGLUStackTritAlibiCSV(
+			qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, attnGainCSV, ffnGainCSV,
+			x, kCur, vCur, dim, hidden, nHeads, nKVHeads, dh, pos, bitplane, eps,
+		)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("gqa_swiglu_prefill_alibi token %d: %w", t, err)
+		}
+		Yflat = append(Yflat, y...)
+	}
+	yLast = make([]float32, dim)
+	copy(yLast, y)
+	return Yflat, kCur, vCur, yLast, nil
+}
+
+
 // --- v0.92 GQA packing ---
 func gqaExpandKV(kv []float32, nTok, nKVHeads, nHeads, dh int) ([]float32, error) {
 	if nTok < 0 || nKVHeads <= 0 || nHeads <= 0 || dh <= 0 {
@@ -12146,6 +12607,154 @@ func biWeightSessionGQASwiGLUPrefillTritFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "weight_session_gqa_swiglu_prefill_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(Y), f32sToSpan(knv), f32sToSpan(vnv), f32sToSpan(yLast)})
+}
+
+// --- v1.16 language bindings: embed_row / logits_tied / alibi stack/prefill ---
+
+func biWeightSessionEmbedRow(id, name, idx, dimV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_embed_row: %v\n", err)
+		os.Exit(1)
+	}
+	y, err := s.embedRow(fmtVal(name), asI(idx), asI(dimV))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_embed_row: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(y)
+}
+
+func biWeightSessionLogitsTied(id, emb, h, dimV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_logits_tied: %v\n", err)
+		os.Exit(1)
+	}
+	hf := make([]float32, len(h.items))
+	for i, v := range h.items {
+		hf[i] = float32(asF(v))
+	}
+	y, err := s.logitsTied(fmtVal(emb), hf, asI(dimV))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_logits_tied: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(y)
+}
+
+func biWeightSessionLogitsTiedTrit(id, emb, h, dimV val) val {
+	return biWeightSessionLogitsTiedTritBP(id, emb, h, dimV, vI32(0))
+}
+func biWeightSessionLogitsTiedTritBP(id, emb, h, dimV, bp val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_logits_tied_trit: %v\n", err)
+		os.Exit(1)
+	}
+	hf := make([]float32, len(h.items))
+	for i, v := range h.items {
+		hf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, err := s.logitsTiedTrit(fmtVal(emb), hf, asI(dimV), use)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_logits_tied_trit: %v\n", err)
+		os.Exit(1)
+	}
+	return f32sToSpan(y)
+}
+
+func biWeightSessionGQASwiGLUStackAlibi(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh val) val {
+	return biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, vStr(""), vStr(""), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUStackAlibiG(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV val) val {
+	return biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, vStr(""), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUStackAlibiGF(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV val) val {
+	return biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUStackAlibiGFP(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos val) val {
+	return biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUStackAlibiGFPB(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp val) val {
+	return biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp, vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUStackAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, x, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_swiglu_stack_alibi: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(x.items))
+	for i, v := range x.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	y, knv, vnv, err := s.gqaSwiGLUStackTritAlibiCSV(
+		fmtVal(qCSV), fmtVal(kCSV), fmtVal(vCSV), fmtVal(oCSV),
+		fmtVal(gateCSV), fmtVal(upCSV), fmtVal(downCSV), fmtVal(attnGainCSV), fmtVal(ffnGainCSV),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(nH), asI(nKV), asI(dh), asF(pos), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_swiglu_stack_alibi: %v\n", err)
+		os.Exit(1)
+	}
+	return vSpan([]val{f32sToSpan(y), f32sToSpan(knv), f32sToSpan(vnv)})
+}
+
+func biWeightSessionGQASwiGLUPrefillAlibi(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh val) val {
+	return biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, vStr(""), vStr(""), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUPrefillAlibiG(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV val) val {
+	return biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, vStr(""), vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUPrefillAlibiGF(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV val) val {
+	return biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, vF32(0), vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUPrefillAlibiGFP(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos val) val {
+	return biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, vI32(0), vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUPrefillAlibiGFPB(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp val) val {
+	return biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp, vF32(1e-6))
+}
+func biWeightSessionGQASwiGLUPrefillAlibiFull(id, qCSV, kCSV, vCSV, oCSV, gateCSV, upCSV, downCSV, xs, Kp, Vp, dimV, hidV, nH, nKV, dh, attnGainCSV, ffnGainCSV, pos, bp, epsV val) val {
+	s, err := getWeightSession(int32(asI(id)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_swiglu_prefill_alibi: %v\n", err)
+		os.Exit(1)
+	}
+	xf := make([]float32, len(xs.items))
+	for i, v := range xs.items {
+		xf[i] = float32(asF(v))
+	}
+	kpf := make([]float32, len(Kp.items))
+	for i, v := range Kp.items {
+		kpf[i] = float32(asF(v))
+	}
+	vpf := make([]float32, len(Vp.items))
+	for i, v := range Vp.items {
+		vpf[i] = float32(asF(v))
+	}
+	use := asF(bp) != 0 || asI(bp) != 0
+	Y, knv, vnv, yLast, err := s.prefillGQASwiGLUStackTritAlibiCSV(
+		fmtVal(qCSV), fmtVal(kCSV), fmtVal(vCSV), fmtVal(oCSV),
+		fmtVal(gateCSV), fmtVal(upCSV), fmtVal(downCSV), fmtVal(attnGainCSV), fmtVal(ffnGainCSV),
+		xf, kpf, vpf, asI(dimV), asI(hidV), asI(nH), asI(nKV), asI(dh), asF(pos), use, asF(epsV),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "weight_session_gqa_swiglu_prefill_alibi: %v\n", err)
 		os.Exit(1)
 	}
 	return vSpan([]val{f32sToSpan(Y), f32sToSpan(knv), f32sToSpan(vnv), f32sToSpan(yLast)})
@@ -15630,6 +16239,46 @@ func (g *gogen) emitCall(n *ast.Call) (string, error) {
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillTritGFPBB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20])
 		default:
 			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillTritFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20], args[21])
+		}
+	case "weight_session_embed_row":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionEmbedRow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+	case "weight_session_logits_tied":
+		fmt.Fprintf(g.b, "\t%s := biWeightSessionLogitsTied(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+	case "weight_session_logits_tied_trit":
+		if len(args) >= 5 {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLogitsTiedTritBP(%s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4])
+		} else {
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionLogitsTiedTrit(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
+		}
+	case "weight_session_gqa_swiglu_stack_alibi":
+		switch len(args) {
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibi(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibiG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibiGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		case 19:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibiGFP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		case 20:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibiGFPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUStackAlibiFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20])
+		}
+	case "weight_session_gqa_swiglu_prefill_alibi":
+		switch len(args) {
+		case 16:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibi(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15])
+		case 17:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibiG(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16])
+		case 18:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibiGF(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17])
+		case 19:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibiGFP(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18])
+		case 20:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibiGFPB(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19])
+		default:
+			fmt.Fprintf(g.b, "\t%s := biWeightSessionGQASwiGLUPrefillAlibiFull(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15], args[16], args[17], args[18], args[19], args[20])
 		}
 	case "load_gguf_window":
 		fmt.Fprintf(g.b, "\t%s := biLoadGgufWindow(%s, %s, %s, %s)\n", tmp, args[0], args[1], args[2], args[3])
