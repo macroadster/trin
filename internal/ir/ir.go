@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 
 // Op is a TrinIR opcode.

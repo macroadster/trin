@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Writes demos/weights/tiny_llm2.gguf — 2 residual transformer layers.

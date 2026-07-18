@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ericchien/trin/internal/parser"
+	"github.com/macroadster/trin/internal/parser"
 )
 
 func TestLowerMLIRToLLVMFromProg(t *testing.T) {

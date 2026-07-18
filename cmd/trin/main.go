@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
-	"github.com/ericchien/trin/internal/codegen"
-	"github.com/ericchien/trin/internal/interp"
-	"github.com/ericchien/trin/internal/ir"
-	"github.com/ericchien/trin/internal/parser"
+	"github.com/macroadster/trin/internal/ast"
+	"github.com/macroadster/trin/internal/codegen"
+	"github.com/macroadster/trin/internal/interp"
+	"github.com/macroadster/trin/internal/ir"
+	"github.com/macroadster/trin/internal/parser"
 )
 
 const version = "1.19.0-go"
@@ -438,7 +438,7 @@ func buildGo(prog *ast.Program, out string) error {
 	}
 	// go build needs a directory module or a lone file outside modules.
 	// Put generated file in a temp dir with go.mod; replace points at Trin source
-	// so GGUF/safetensors readers resolve via github.com/ericchien/trin/internal/weights.
+	// so GGUF/safetensors readers resolve via github.com/macroadster/trin/internal/weights.
 	dir, err := os.MkdirTemp("", "trin-build-*")
 	if err != nil {
 		return err
@@ -518,7 +518,7 @@ func trinModuleRoot() (string, error) {
 		for i := 0; i < 8; i++ {
 			gm := filepath.Join(dir, "go.mod")
 			if b, err := os.ReadFile(gm); err == nil {
-				if strings.Contains(string(b), "module github.com/ericchien/trin") {
+				if strings.Contains(string(b), "module github.com/macroadster/trin") {
 					return filepath.Abs(dir)
 				}
 			}

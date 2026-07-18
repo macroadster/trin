@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/ericchien/trin/internal/weights"
-	"github.com/ericchien/trin/pkg/starlight"
+	"github.com/macroadster/trin/internal/weights"
+	"github.com/macroadster/trin/pkg/starlight"
 )
 
 func repoRoot(t *testing.T) string {

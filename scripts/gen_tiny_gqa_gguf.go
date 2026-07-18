@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Writes demos/weights/tiny_gqa.gguf — 2-layer GQA toy for greedy decode.

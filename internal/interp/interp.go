@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ad"
-	"github.com/ericchien/trin/internal/ast"
-	"github.com/ericchien/trin/internal/cuda"
-	"github.com/ericchien/trin/internal/parser"
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/ad"
+	"github.com/macroadster/trin/internal/ast"
+	"github.com/macroadster/trin/internal/cuda"
+	"github.com/macroadster/trin/internal/parser"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 type Error struct {

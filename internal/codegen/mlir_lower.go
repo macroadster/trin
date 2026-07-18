@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 
 // EmitMLIRLLVM is the v0.22+ path: emit portable MLIR, then lower to LLVM IR text.

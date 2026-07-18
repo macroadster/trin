@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 // Note: weight readers (GGUF/safetensors) are imported by *generated* programs only.
 
@@ -4102,7 +4102,7 @@ func biGradScale(s, xs val) val {
 }
 func biGradMapMul(s, xs val) val { return biGradScale(s, xs) }
 
-// --- embedded mini reverse-mode AD (mirrors github.com/ericchien/trin/internal/ad) ---
+// --- embedded mini reverse-mode AD (mirrors github.com/macroadster/trin/internal/ad) ---
 type adKind int
 
 const (

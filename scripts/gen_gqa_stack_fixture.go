@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Writes demos/weights/gqa_stack.gguf — 2 residual GQA layers.

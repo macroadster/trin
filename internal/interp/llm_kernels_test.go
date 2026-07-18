@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 func runOK(t *testing.T, src string) string {

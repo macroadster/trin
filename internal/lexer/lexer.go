@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"unicode"
 
-	"github.com/ericchien/trin/internal/token"
+	"github.com/macroadster/trin/internal/token"
 )
 
 type Error struct {

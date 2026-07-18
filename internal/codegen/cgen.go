@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 
 // EmitC lowers a Trin program to standalone C that implements the runtime

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Writes demos/weights/attn_stack.gguf — two residual transformer layers.

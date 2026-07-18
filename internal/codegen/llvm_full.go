@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 
 // hasLLVMMain reports whether IR already defines a program entrypoint.

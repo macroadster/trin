@@ -3,7 +3,7 @@
 //
 // Stargate integration — replace ForwardStarlight body:
 //
-//	import "github.com/ericchien/trin/pkg/starlight"
+//	import "github.com/macroadster/trin/pkg/starlight"
 //
 //	sess, err := starlight.Open(ggufPath) // or reuse a process-wide session
 //	if err != nil { return err }
@@ -17,14 +17,14 @@
 //	})
 //	// out.Stego, out.Method, out.BitOrder, out.Embedding
 //
-// Do NOT import github.com/ericchien/trin/internal/* from Stargate.
+// Do NOT import github.com/macroadster/trin/internal/* from Stargate.
 // Keep MinimalGGUF open for other heads or switch fully to starlight.Open.
 package starlight
 
 import (
 	"fmt"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Session wraps a GGUF weight session for BalancedStarlightDetector inference.

@@ -96,7 +96,7 @@ Notes:
 ### Preferred: public package (no `internal` import)
 
 ```go
-import "github.com/ericchien/trin/pkg/starlight"
+import "github.com/macroadster/trin/pkg/starlight"
 
 sess, err := starlight.Open(ggufPath)
 if err != nil { return err }
@@ -114,7 +114,7 @@ out, err := sess.Forward(starlight.Inputs{
 ```
 
 **Replace Stargate `ForwardStarlight` body** with the above. Do **not** import
-`github.com/ericchien/trin/internal/*` from Stargate.
+`github.com/macroadster/trin/internal/*` from Stargate.
 
 Mapping `UnifiedInput` → `starlight.Inputs` (typical field names):
 

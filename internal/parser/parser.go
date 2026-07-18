@@ -3,9 +3,9 @@ package parser
 import (
 	"fmt"
 
-	"github.com/ericchien/trin/internal/ast"
-	"github.com/ericchien/trin/internal/lexer"
-	"github.com/ericchien/trin/internal/token"
+	"github.com/macroadster/trin/internal/ast"
+	"github.com/macroadster/trin/internal/lexer"
+	"github.com/macroadster/trin/internal/token"
 )
 
 type Error struct {

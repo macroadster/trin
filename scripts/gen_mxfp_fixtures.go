@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 func main() {

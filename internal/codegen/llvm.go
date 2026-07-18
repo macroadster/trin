@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
-	"github.com/ericchien/trin/internal/ir"
+	"github.com/macroadster/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ir"
 )
 
 // LLVMHostDriver returns a small C main that probes a pure float kernel exported

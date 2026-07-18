@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ericchien/trin/internal/ast"
-	"github.com/ericchien/trin/internal/ir"
+	"github.com/macroadster/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ir"
 )
 
 // EmitMLIR produces a self-contained Trin MLIR text module (v0.21+).

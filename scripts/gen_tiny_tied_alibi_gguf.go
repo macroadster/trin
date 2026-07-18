@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 // Writes demos/weights/tiny_tied_alibi.gguf — 2-layer GQA + SwiGLU + tied emb + ALiBi.

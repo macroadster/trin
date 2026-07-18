@@ -8,7 +8,7 @@ import (
 	"math"
 	"path/filepath"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 func f32raw(vals []float32) []byte {

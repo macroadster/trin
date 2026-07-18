@@ -8,7 +8,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/ericchien/trin/internal/weights"
+	"github.com/macroadster/trin/internal/weights"
 )
 
 func fp16(f float32) uint16 {

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ericchien/trin/internal/ast"
+	"github.com/macroadster/trin/internal/ast"
 )
 
 func almost(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
