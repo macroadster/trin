@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.22.12'
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          BIN="trin-${{ matrix.os }}-${{ matrix.arch }}"
+          go build -trimpath -ldflags="-s -w" -o "${BIN}" ./cmd/trin
+          tar -czf "${BIN}.tar.gz" "${BIN}"
+          sha256sum "${BIN}" "${BIN}.tar.gz" > "${BIN}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trin-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            trin-${{ matrix.os }}-${{ matrix.arch }}
+            trin-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+            trin-${{ matrix.os }}-${{ matrix.arch }}.sha256
+
+  release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum trin-* > checksums-sha256.txt
+          ls -la
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/trin-*
+            artifacts/checksums-sha256.txt
