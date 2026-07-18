@@ -1,0 +1,87 @@
+// v1.19 — Starlight BalancedStarlightDetector CNN via GGUF weight session
+// Path: STARLIGHT_GGUF > STARLIGHT_TRIN_MODEL > demos/weights/starlight_fixture.gguf
+// Phases: 2a head matvec smoke; 2b/2c CSV+demo H=32 on fixture; optional 256 if STARLIGHT_FULL=1
+
+fn main() {
+    let e1 = getenv("STARLIGHT_GGUF");
+    let e2 = getenv("STARLIGHT_TRIN_MODEL");
+    let path = (str_len(e1) > 0) | e1 | ((str_len(e2) > 0) | e2 | "demos/weights/starlight_fixture.gguf");
+    println(str_concat("gguf=", path));
+
+    let id = open_weight_session(path);
+    let names = weight_session_list(id);
+    println(str_concat("n_tensors=", to_str(len(names))));
+    let arch = weight_session_meta(id, "general.architecture");
+    println(str_concat("arch=", arch));
+
+    // ---- 2a: stego_head linear smoke (W [1,64], b [1]) ----
+    let sh_w = weight_session_shape(id, "stego_head.weight");
+    let sh_b = weight_session_shape(id, "stego_head.bias");
+    println(str_concat("stego_head.weight_shape=", to_str(sh_w)));
+    println(str_concat("stego_head.bias_shape=", to_str(sh_b)));
+    let W = weight_session_tensor(id, "stego_head.weight");
+    let b = weight_session_tensor(id, "stego_head.bias");
+    let zeros = map((x) => 0.0, range(64));
+    let ones = map((x) => 1.0, range(64));
+    let y0 = weight_session_linear(id, "stego_head.weight", zeros, 1, 64);
+    let y1 = linear_bias(W, ones, b, 1, 64);
+    let y0b = linear_bias(W, zeros, b, 1, 64);
+    println(str_concat("matvec_zeros_nobias=", to_str(y0)));
+    println(str_concat("matvec_zeros_bias=", to_str(y0b)));
+    println(str_concat("matvec_ones_bias=", to_str(y1)));
+    println("phase_2a_ok");
+
+    // ---- 2b/2c: fixture CSV path or always demo@32 ----
+    let is_fixture = str_contains(path, "fixture");
+    when (is_fixture == 1) do println("phase_2b_csv");
+    when (is_fixture == 1) do {
+        let pixel = load_f32_csv("demos/weights/starlight_inputs/pixel.csv");
+        let meta = load_f32_csv("demos/weights/starlight_inputs/meta.csv");
+        let alpha = load_f32_csv("demos/weights/starlight_inputs/alpha.csv");
+        let lsb = load_f32_csv("demos/weights/starlight_inputs/lsb.csv");
+        let palette = load_f32_csv("demos/weights/starlight_inputs/palette.csv");
+        let palette_lsb = load_f32_csv("demos/weights/starlight_inputs/palette_lsb.csv");
+        let format = load_f32_csv("demos/weights/starlight_inputs/format_features.csv");
+        let content = load_f32_csv("demos/weights/starlight_inputs/content_features.csv");
+        let out = starlight_forward(id, pixel, meta, alpha, lsb, palette, palette_lsb, format, content, 32, 32, 0.3);
+        println(str_concat("csv_out_len=", to_str(len(out))));
+        println(str_concat("csv_stego=", to_str(out[0])));
+        println(str_concat("csv_method0=", to_str(out[1])));
+        let exp = load_f32_csv("demos/weights/starlight_expected.csv");
+        let d0r = out[0] - exp[0];
+        let d0 = (d0r < 0.0) | (0.0 - d0r) | d0r;
+        println(str_concat("csv_stego_abs_err=", to_str(d0)));
+        let parity = (d0 < 0.0001) | 1 | 0;
+        println(str_concat("csv_parity_ok=", to_str(parity)));
+        1
+    };
+
+    // demo LCG seed=99 @ 32x32 (fixture parity path + real-model smoke)
+    let demo32 = starlight_demo_forward(id, 32, 32, 99, 0.3);
+    println(str_concat("demo32_len=", to_str(len(demo32))));
+    println(str_concat("demo32_stego=", to_str(demo32[0])));
+    println(str_concat("demo32_method0=", to_str(demo32[1])));
+    when (is_fixture == 1) do {
+        let exp2 = load_f32_csv("demos/weights/starlight_expected.csv");
+        let e0r = demo32[0] - exp2[0];
+        let e0 = (e0r < 0.0) | (0.0 - e0r) | e0r;
+        println(str_concat("demo32_stego_abs_err=", to_str(e0)));
+        let ok = (e0 < 0.0001) | 1 | 0;
+        println(str_concat("demo32_parity_ok=", to_str(ok)));
+        1
+    };
+
+    // optional full spatial (slow on CPU CNN) — STARLIGHT_FULL=1
+    let full = getenv("STARLIGHT_FULL");
+    let do_full = (str_contains(full, "1") > 0) | 1 | 0;
+    when (do_full == 1) do {
+        println("phase_full_256");
+        let demo256 = starlight_demo_forward(id, 256, 256, 99, 0.3);
+        println(str_concat("demo256_len=", to_str(len(demo256))));
+        println(str_concat("demo256_stego=", to_str(demo256[0])));
+        1
+    };
+
+    close_weight_session(id);
+    println("starlight_infer_ok");
+}

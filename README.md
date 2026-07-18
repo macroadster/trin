@@ -307,6 +307,7 @@ span_concat(a,b)
 ./trin run examples/weight_session_layer_stack.trin
 ./trin run examples/weight_session_attn.trin
 ./trin run examples/weight_session_gqa.trin
+./trin run examples/starlight_infer.trin   # Starlight CNN (v1.19); see docs/STARLIGHT_INFER.md
 ./trin run examples/weight_iq_tq.trin
 ./trin run examples/weight_iq_tq2.trin
 ./trin run examples/weight_iq_grid.trin
@@ -342,6 +343,7 @@ greedily decodes three tokens on CPU (no CUDA).
 (`.safetensors` + `.gguf`), quantizes, and runs `linear_trit`.
 `examples/load_gguf_mmap.trin` probes `weight_file_mapped` and loads one Q4_0 tensor.
 `examples/weight_session.trin` keeps one mmap open and loads weight+bias.
+`examples/starlight_infer.trin` runs Starlight CNN via GGUF weight session — see `docs/STARLIGHT_INFER.md` and public `pkg/starlight` for Stargate.
 `examples/weight_window.trin` decodes contiguous element windows (F32 + Q4).
 `examples/weight_session_linear.trin` matsvec from row tiles on retained sessions.
 `examples/weight_session_linear_fused.trin` block-streams Q dequant into dots (no full-tile f32).
@@ -391,6 +393,14 @@ greedily decodes three tokens on CPU (no CUDA).
 | Tied emb + ALiBi decode (v1.16) | Session embed/logits_tied, ALiBi GQA |
 | Llama GGUF name map (v1.17) | short↔token_embd/blk.N.* adapters |
 | Sliding-window ALiBi (v1.18) | local attention window on ALiBi GQA |
+| Starlight CNN GGUF infer (v1.19) | im2col stacks + fusion heads; `pkg/starlight` |
+
+### Acceptance (v1.19)
+
+- `go test ./internal/weights/ -run Starlight` green (fixture session + CNN ops)
+- `./trin run examples/starlight_infer.trin` prints `starlight_infer_ok` (default fixture)
+- `pkg/starlight` importable from Stargate (no `internal/*`); see `docs/STARLIGHT_INFER.md`
+- Prior v1.18 demos still pass (`weight_session_alibi_window_ok`)
 
 ### Acceptance (v1.18)
 
@@ -401,6 +411,7 @@ greedily decodes three tokens on CPU (no CUDA).
 
 ## Next
 
+- v1.19: Starlight BalancedStarlightDetector CNN via GGUF weight session + `pkg/starlight`
 - v1.18: sliding-window ALiBi residual GQA SwiGLU
 - v1.17: real-layout GGUF name adapters (llama.cpp / HF-style)
 - v1.16: tied emb + ALiBi residual GQA SwiGLU prefill/decode

@@ -8990,26 +8990,50 @@ func (it *Interpreter) installBuiltins() {
 
 
 	// ---- Weight / tensor I/O (v0.81 production) ----
+	// getenv(key) → str (empty if unset) — v1.19
+	nat("getenv", func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Void(), &Error{Msg: "getenv(key)"}
+		}
+		return Str(os.Getenv(strArg(args[0]))), nil
+	})
+	// str_contains(s, sub) → i32 (1 if sub in s)
+	nat("str_contains", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "str_contains(s, sub)"}
+		}
+		if strings.Contains(strArg(args[0]), strArg(args[1])) {
+			return I32(1), nil
+		}
+		return I32(0), nil
+	})
 	// load_f32_csv(path) → span[f32] from comma/whitespace separated floats
+	// Skips empty tokens and full-line `#` comments (and trailing `# ...` on a line).
 	nat("load_f32_csv", func(args []Value) (Value, error) {
 		if len(args) < 1 {
 			return Void(), &Error{Msg: "load_f32_csv(path)"}
 		}
-		path := args[0].String()
-		if path == "" && args[0].Kind == VStr {
-			path = args[0].Str
-		}
-		// Value.String() prints; prefer raw str field
-		if args[0].Kind == VStr {
-			path = args[0].Str
-		} else {
-			path = args[0].String()
-		}
+		path := strArg(args[0])
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return Void(), &Error{Msg: "load_f32_csv: " + err.Error()}
 		}
-		fields := strings.FieldsFunc(string(b), func(r rune) bool {
+		// Strip # comments per line, then tokenize on comma/whitespace.
+		var cleaned strings.Builder
+		for _, line := range strings.Split(string(b), "\n") {
+			if i := strings.IndexByte(line, '#'); i >= 0 {
+				line = line[:i]
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if cleaned.Len() > 0 {
+				cleaned.WriteByte('\n')
+			}
+			cleaned.WriteString(line)
+		}
+		fields := strings.FieldsFunc(cleaned.String(), func(r rune) bool {
 			return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r' || r == ';'
 		})
 		out := make([]Value, 0, len(fields))
@@ -11771,7 +11795,131 @@ func (it *Interpreter) installBuiltins() {
 		return I32(b.N), nil
 	})
 
+	// ---- Starlight CNN / BalancedStarlightDetector (v1.19) ----
+	// relu_f32(x) → span[f32] elementwise ReLU
+	nat("relu_f32", func(args []Value) (Value, error) {
+		if len(args) < 1 || args[0].Kind != VSpan {
+			return Void(), &Error{Msg: "relu_f32(span)"}
+		}
+		return f32SliceToSpan(weights.ReLU(spanToF32(args[0]))), nil
+	})
+	// sigmoid_f32(x) → span[f32] elementwise sigmoid
+	nat("sigmoid_f32", func(args []Value) (Value, error) {
+		if len(args) < 1 || args[0].Kind != VSpan {
+			return Void(), &Error{Msg: "sigmoid_f32(span)"}
+		}
+		return f32SliceToSpan(weights.Sigmoid(spanToF32(args[0]))), nil
+	})
+	// linear_bias(W, x, b, M, K) → y = W@x + b; b may be empty span (no bias)
+	nat("linear_bias", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "linear_bias(W, x, b, M, K)"}
+		}
+		W := spanToF32(args[0])
+		x := spanToF32(args[1])
+		var b []float32
+		if args[2].Kind == VSpan && len(args[2].Span) > 0 {
+			b = spanToF32(args[2])
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		y, err := weights.LinearBias(W, x, b, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: "linear_bias: " + err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+	// starlight_forward(id, pixel, meta, alpha, lsb, palette, palette_lsb, format, content, H, W [, meta_weight])
+	// → span[f32] ConcatOutputs: stego(1)+method(5)+bit_order(3)+embedding(64)=73
+	nat("starlight_forward", func(args []Value) (Value, error) {
+		if len(args) < 11 {
+			return Void(), &Error{Msg: "starlight_forward(id, pixel, meta, alpha, lsb, palette, palette_lsb, format, content, H, W [, meta_weight])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "starlight_forward: " + err.Error()}
+		}
+		// args: id, pixel, meta, alpha, lsb, palette, palette_lsb, format, content, H, W [, mw]
+		// spans occupy indices 1..8; H/W are 9/10
+		for i := 1; i <= 8; i++ {
+			if args[i].Kind != VSpan {
+				return Void(), &Error{Msg: "starlight_forward: args 1..8 must be span[f32]"}
+			}
+		}
+		mw := float32(0.3)
+		if len(args) >= 12 {
+			mw = float32(args[11].AsFloat())
+		}
+		in := weights.StarlightInputs{
+			Pixel:           spanToF32(args[1]),
+			Meta:            spanToF32(args[2]),
+			Alpha:           spanToF32(args[3]),
+			LSB:             spanToF32(args[4]),
+			Palette:         spanToF32(args[5]),
+			PaletteLSB:      spanToF32(args[6]),
+			FormatFeatures:  spanToF32(args[7]),
+			ContentFeatures: spanToF32(args[8]),
+			H:               args[9].AsInt(),
+			W:               args[10].AsInt(),
+			MetaWeight:      mw,
+		}
+		out, err := weights.StarlightForwardSession(s, in)
+		if err != nil {
+			return Void(), &Error{Msg: "starlight_forward: " + err.Error()}
+		}
+		return f32SliceToSpan(out.ConcatOutputs()), nil
+	})
+	// starlight_demo_forward(id, H, W, seed [, meta_weight]) — LCG inputs + full CNN
+	nat("starlight_demo_forward", func(args []Value) (Value, error) {
+		if len(args) < 4 {
+			return Void(), &Error{Msg: "starlight_demo_forward(id, H, W, seed [, meta_weight])"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "starlight_demo_forward: " + err.Error()}
+		}
+		H, W := args[1].AsInt(), args[2].AsInt()
+		if H <= 0 || W <= 0 {
+			return Void(), &Error{Msg: "starlight_demo_forward: H,W must be > 0"}
+		}
+		seed := uint64(args[3].AsInt())
+		mw := float32(0.3)
+		if len(args) >= 5 {
+			mw = float32(args[4].AsFloat())
+		}
+		g := &weights.StarlightLCG{S: seed}
+		in := weights.StarlightInputs{
+			Pixel:           g.Fill(3 * H * W),
+			Meta:            g.Fill(2048),
+			Alpha:           g.Fill(2 * H * W),
+			LSB:             g.Fill(3 * H * W),
+			Palette:         g.Fill(768),
+			PaletteLSB:      g.Fill(1 * H * W),
+			FormatFeatures:  g.Fill(6),
+			ContentFeatures: g.Fill(6),
+			H:               H,
+			W:               W,
+			MetaWeight:      mw,
+		}
+		out, err := weights.StarlightForwardSession(s, in)
+		if err != nil {
+			return Void(), &Error{Msg: "starlight_demo_forward: " + err.Error()}
+		}
+		return f32SliceToSpan(out.ConcatOutputs()), nil
+	})
+
 	_ = math.Abs
+}
+
+// spanToF32 converts a VSpan of numeric values to []float32.
+func spanToF32(v Value) []float32 {
+	if v.Kind != VSpan {
+		return nil
+	}
+	out := make([]float32, len(v.Span))
+	for i, x := range v.Span {
+		out[i] = float32(x.AsFloat())
+	}
+	return out
 }
 
 func strArg(v Value) string {
