@@ -393,7 +393,9 @@ greedily decodes three tokens on CPU (no CUDA).
 | Tied emb + ALiBi decode (v1.16) | Session embed/logits_tied, ALiBi GQA |
 | Llama GGUF name map (v1.17) | short↔token_embd/blk.N.* adapters |
 | Sliding-window ALiBi (v1.18) | local attention window on ALiBi GQA |
-| Starlight CNN GGUF infer (v1.19) | im2col stacks + fusion heads; `pkg/starlight` |
+| Starlight BalancedStarlightDetector (v1.19) | im2col stacks + fusion heads; `pkg/starlight`; `docs/STARLIGHT_INFER.md` |
+| Starlight steg CPU assist (v1.20) | `internal/steg` LSB trit + residual planes + packed filter score; `starlight_steg_serve`; `docs/STARLIGHT_STEG.md` |
+| Tiny trit stego-CNN scaffold (v1.21) | GGUF `tiny_steg_cnn` → `ForwardStegCNN` trit path (sidecar, not the production detector) |
 
 ### Acceptance (v1.19)
 
@@ -402,16 +404,19 @@ greedily decodes three tokens on CPU (no CUDA).
 - `pkg/starlight` importable from Stargate (no `internal/*`); see `docs/STARLIGHT_INFER.md`
 - Prior v1.18 demos still pass (`weight_session_alibi_window_ok`)
 
-### Acceptance (v1.18)
+### Acceptance (v1.20 / v1.21)
 
-- `go test` green (weights AlibiSlidingWindow + interp alibi_window demo)
-- `bash scripts/e2e_native.sh` green including `weight_session_alibi_window`
-- `./trin run examples/weight_session_alibi_window.trin` shows `weight_session_alibi_window_ok` / `window_ok=1` / `gen_text=FFF`
-- Prior v1.17 demos still pass (`weight_session_llama_named_ok`)
+- `go test ./internal/steg -count=1` green
+- `go run scripts/starlight_steg_serve.go demo` → `starlight_steg_serve_demo_ok=1`
+- `go run scripts/gen_tiny_steg_cnn_gguf.go .` writes `demos/weights/tiny_steg_cnn.gguf`
+- `go run scripts/starlight_steg_serve.go cnn` → `starlight_steg_serve_cnn_ok=1` + `python_proxy=0` + prepack hits
+- `./trin run examples/starlight_steg_cnn.trin` (+ Go build) → `starlight_steg_cnn_ok` + L0/L1/Head parity
 
 ## Next
 
-- v1.19: Starlight BalancedStarlightDetector CNN via GGUF weight session + `pkg/starlight`
+- v1.21: tiny trit stego-CNN scaffold (`internal/steg` + `tiny_steg_cnn.gguf`)
+- v1.20: Starlight steganography ultra-low-bit CPU assist (LSB + residual)
+- v1.19: Starlight BalancedStarlightDetector CNN via GGUF + `pkg/starlight`
 - v1.18: sliding-window ALiBi residual GQA SwiGLU
 - v1.17: real-layout GGUF name adapters (llama.cpp / HF-style)
 - v1.16: tied emb + ALiBi residual GQA SwiGLU prefill/decode

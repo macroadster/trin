@@ -1,6 +1,6 @@
 # Trin production readiness — virtual ternary LLM compiler
 
-**Version:** 1.18.0-go  
+**Version:** 1.21.0-go  
 **Status:** Production-ready for CPU virtual-ternary LLM *inference kernels*,
 KV-cache helpers, deterministic sampling, CSV weight I/O, pure-Go **GGUF /
 safetensors** importers with **block-quant dequant** (incl. **full IQ1 family
@@ -12,7 +12,7 @@ session runner**, **session-wired multi-head attention**, **GQA packing
 helpers**, and **loop/for surface sugar** (`when` / `over` / `for-in` / `range`), and an additive **CUDA path**
 (device probe + portable `cuda_linear_f32` / `cuda_gemm_f32` / `cuda_linear_trit` with
 cpu-fallback when no NVIDIA driver is present),
-and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10), plus **tiny GGUF greedy decode on session trit-attn** (v1.11), plus a **multi-layer residual trit-attn decoder stack** (v1.12), plus **multi-layer GGUF greedy decode on that stack** (v1.13), plus a **multi-layer residual GQA stack with final RMSNorm decode** (v1.14), plus **multi-token GQA SwiGLU prefill + residual decode** (v1.15), plus **tied emb + ALiBi residual decode** (v1.16), plus **llama.cpp-style GGUF name adapters** (v1.17), plus **sliding-window ALiBi** (v1.18).
+and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stubs), plus a **char/token table tokenizer** and an end-to-end **GGUF session greedy decode** path (v1.04), plus **packed bitplane `linear_trit`** and a **local BPE sidecar** (v1.05), plus **session-backed packed trit linear** (`weight_session_linear_trit`, v1.06), plus a **session trit prepack cache** (`weight_session_prepack_trit` / `weight_session_linear_trit_cached`, v1.07), plus **tiny GGUF decode wired through the trit cache** (v1.08), plus a **trit residual layer stack** (`weight_session_layer_stack_trit` / `forward_block_trit`, v1.09), plus **session attn/MHA/GQA on trit-cached projections** (v1.10), plus **tiny GGUF greedy decode on session trit-attn** (v1.11), plus a **multi-layer residual trit-attn decoder stack** (v1.12), plus **multi-layer GGUF greedy decode on that stack** (v1.13), plus a **multi-layer residual GQA stack with final RMSNorm decode** (v1.14), plus **multi-token GQA SwiGLU prefill + residual decode** (v1.15), plus **tied emb + ALiBi residual decode** (v1.16), plus **llama.cpp-style GGUF name adapters** (v1.17), plus **sliding-window ALiBi** (v1.18), plus **Starlight BalancedStarlightDetector** GGUF CNN eval (`internal/weights` im2col stacks, `pkg/starlight`, `docs/STARLIGHT_INFER.md`) (v1.19), plus a **Starlight steganography CPU assist** (`internal/steg`, trit LSB embed/extract, residual bitplane markers, ternary filter score, `starlight_steg_serve` CLI, `examples/starlight_steg_trit.trin`) (v1.20), plus a **tiny trit stego-CNN scaffold** (`tiny_steg_cnn.gguf`, `ForwardStegCNN` / trit prepack, `examples/starlight_steg_cnn.trin`; not a replacement for BalancedStarlightDetector) (v1.21).
 
 ## What is production-ready
 
@@ -35,7 +35,10 @@ and a **PTX layer** (emitters + optional offline `ptxas` cubin + host buffer stu
 34. **Tied emb + ALiBi (v1.16)** — `embed_row` / `logits_tied[_trit]`; `gqa_swiglu_{stack,prefill}_alibi`; fixture `tiny_tied_alibi.gguf` → `FFF`
 35. **Name adapters (v1.17)** — `AutoNameMap` / `ResolveName`; short `L0_q`→`blk.0.attn_q.weight`; `tiny_llama_named.gguf` → `FFF`
 36. **Sliding-window ALiBi (v1.18)** — `AlibiBiasWindow` + `*_alibi_window` stack/prefill; mask-only local attn; demo → `FFF`
-37–39. Linear trit, transformer cores, KV/sample, toolchain, verification
+37. **Starlight BalancedStarlightDetector (v1.19)** — im2col conv stacks + BN + ReLU + fusion heads over GGUF; public `pkg/starlight` for Stargate; fixture parity docs in `docs/STARLIGHT_INFER.md`
+38. **Starlight steg CPU assist (v1.20)** — `internal/steg` payload↔trit LSB, sha256 pixel commitment, residual plane popcount, packed trit filter score; CLI `scripts/starlight_steg_serve.go`; demo `examples/starlight_steg_trit.trin`; doc `docs/STARLIGHT_STEG.md`
+39. **Tiny trit stego-CNN scaffold (v1.21)** — GGUF export fixture `tiny_steg_cnn.gguf` (im2col L0/L1/Head); `ForwardStegCNN` + `PrepackCNNTrit`; serve `cnn` cmd + `examples/starlight_steg_cnn.trin` (sidecar path; production detector remains v1.19/`pkg/starlight`)
+40–42. Linear trit, transformer cores, KV/sample, toolchain, verification
 
 ## Loop/for sugar (v1.01)
 
@@ -353,6 +356,15 @@ Demo: `examples/weight_session_alibi_window.trin` — window=0 parity, window=2 
 - [x] Sliding-window ALiBi residual GQA
 - [x] Demo `weight_session_alibi_window` (FFF)
 - [x] Version `1.18.0-go`
+- [x] Starlight BalancedStarlightDetector CNN via GGUF weight session
+- [x] `pkg/starlight` + `examples/starlight_infer.trin` + `docs/STARLIGHT_INFER.md`
+- [x] Version `1.19.0-go`
+- [x] Starlight steg CPU assist (embed/extract + trit filter score)
+- [x] Demo `starlight_steg_trit` + serve CLI `starlight_steg_serve`
+- [x] Version `1.20.0-go`
+- [x] Tiny trit stego-CNN scaffold (`tiny_steg_cnn.gguf` + `ForwardStegCNN`)
+- [x] Demo `starlight_steg_cnn` + serve `cnn` (python_proxy=0)
+- [x] Version `1.21.0-go`
 - [x] No bulk renames
 
 ## How to run
@@ -387,6 +399,15 @@ go run scripts/gen_trit_session_fixture.go .
 ./trin run examples/weight_session_linear_trit.trin
 ./trin run examples/linear_trit_bench.trin
 ./trin run examples/weight_session_trit_cache.trin
+./trin run examples/starlight_infer.trin
+go test ./internal/weights -run Starlight -count=1
+./trin run examples/starlight_steg_trit.trin
+go run scripts/gen_tiny_steg_cnn_gguf.go .
+go test ./internal/steg -count=1
+go run scripts/starlight_steg_serve.go demo
+go run scripts/starlight_steg_serve.go cnn
+go run scripts/starlight_steg_serve.go bench
+./trin run examples/starlight_steg_cnn.trin
 bash scripts/bench_session_linear_trit.sh
 bash scripts/e2e_native.sh
 ```

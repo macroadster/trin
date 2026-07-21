@@ -1,0 +1,125 @@
+// v1.20 — Starlight steganography assist on ternary CPU kernels
+//
+// Residual marker + trit filter bank on synthetic blue features.
+// Real LSB embed / sha256 pixel commitment live in:
+//   internal/steg + scripts/starlight_steg_serve.go
+//
+// Native-safe: free spans + quantize_absmean + linear_trit parity.
+
+fn make_residual() {
+    // 128-lane residual trit map: cover-smooth head, payload-like tail
+    let head = [
+        trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0),
+        trit(1), trit(0), trit(-1), trit(0), trit(0), trit(1), trit(0), trit(-1),
+        trit(0), trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0),
+        trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0), trit(-1), trit(0),
+        trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0),
+        trit(1), trit(0), trit(-1), trit(0), trit(0), trit(1), trit(0), trit(-1),
+        trit(0), trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0),
+        trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0), trit(-1), trit(0),
+        trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0),
+        trit(1), trit(0), trit(-1), trit(0), trit(0), trit(1), trit(0), trit(-1),
+        trit(0), trit(0), trit(1), trit(0), trit(-1), trit(0), trit(1), trit(0),
+        trit(0), trit(-1), trit(0), trit(1), trit(0), trit(0), trit(-1), trit(0)
+    ]; // 96
+    let tail = [
+        trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1),
+        trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1),
+        trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1),
+        trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1), trit(1), trit(-1)
+    ]; // 32 → total 128
+    span_concat(head, tail)
+}
+
+fn make_features() {
+    // 128 f32 features (centered blue-like)
+    let p = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75
+    ]; // 32
+    let a = span_concat(p, p); // 64
+    span_concat(a, a)          // 128
+}
+
+fn make_filters() {
+    // 8 x 128 f32 weights
+    let row = [
+        1.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, -1.0,
+        0.25, -0.25, 0.75, -0.75, 0.0, 1.0, 0.0, -1.0,
+        1.0, -1.0, 0.5, 0.0, -0.5, 1.0, 0.0, -1.0,
+        0.0, 0.5, -0.5, 1.0, -1.0, 0.25, -0.25, 0.0,
+        1.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, -1.0,
+        0.25, -0.25, 0.75, -0.75, 0.0, 1.0, 0.0, -1.0,
+        1.0, -1.0, 0.5, 0.0, -0.5, 1.0, 0.0, -1.0,
+        0.0, 0.5, -0.5, 1.0, -1.0, 0.25, -0.25, 0.0,
+        1.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, -1.0,
+        0.25, -0.25, 0.75, -0.75, 0.0, 1.0, 0.0, -1.0,
+        1.0, -1.0, 0.5, 0.0, -0.5, 1.0, 0.0, -1.0,
+        0.0, 0.5, -0.5, 1.0, -1.0, 0.25, -0.25, 0.0,
+        1.0, 0.0, -1.0, 0.5, -0.5, 0.0, 1.0, -1.0,
+        0.25, -0.25, 0.75, -0.75, 0.0, 1.0, 0.0, -1.0,
+        1.0, -1.0, 0.5, 0.0, -0.5, 1.0, 0.0, -1.0,
+        0.0, 0.5, -0.5, 1.0, -1.0, 0.25, -0.25, 0.0
+    ]; // 128
+    let r2 = span_concat(row, row);
+    let r4 = span_concat(r2, r2);
+    span_concat(r4, r4) // 8 rows
+}
+
+fn main() {
+    let resid = make_residual();
+    let packed = trit_pack_words(resid);
+    let posW = packed[0];
+    let negW = packed[1];
+    let n = packed[2];
+    let pc_pos = trit_plane_popcount(posW);
+    let pc_neg = trit_plane_popcount(negW);
+    let marker = (pc_pos + pc_neg) * 1.0 / (n * 1.0);
+
+    let Wf = make_filters();
+    let q = quantize_absmean(Wf);
+    let Wt = q[0];
+    let scale = q[1];
+    let x = make_features();
+    let M = 8;
+    let K = 128;
+    let y0 = linear_trit(Wt, x, M, K, scale, 0);
+    let y1 = linear_trit(Wt, x, M, K, scale, 1);
+    let d0 = y0[0] - y1[0];
+    let ad = (d0 < 0.0) | (0.0 - d0) | d0;
+    // native-safe |abs| without map soft_mux bodies (codegen limits)
+    let a0 = (y0[0] < 0.0) | (0.0 - y0[0]) | y0[0];
+    let a1 = (y0[1] < 0.0) | (0.0 - y0[1]) | y0[1];
+    let a2 = (y0[2] < 0.0) | (0.0 - y0[2]) | y0[2];
+    let a3 = (y0[3] < 0.0) | (0.0 - y0[3]) | y0[3];
+    let a4 = (y0[4] < 0.0) | (0.0 - y0[4]) | y0[4];
+    let a5 = (y0[5] < 0.0) | (0.0 - y0[5]) | y0[5];
+    let a6 = (y0[6] < 0.0) | (0.0 - y0[6]) | y0[6];
+    let a7 = (y0[7] < 0.0) | (0.0 - y0[7]) | y0[7];
+    let filter = (a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7) / (M * 1.0);
+
+    // back-round residual via unpack (scalar * is map-safe for codegen)
+    let back = trit_unpack_words(posW, negW, n);
+    let bsum = sum(map((t) => t * 1.0, back));
+    let rsum = sum(map((t) => t * 1.0, resid));
+    let round_d = bsum - rsum;
+    let round_ad = (round_d < 0.0) | (0.0 - round_d) | round_d;
+
+    println("starlight_steg_trit_ok=1");
+    println(str_concat("n=", to_str(n)));
+    println(str_concat("nwords=", to_str(len(posW))));
+    println(str_concat("marker_density=", to_str(marker)));
+    println(str_concat("pc_pos=", to_str(pc_pos)));
+    println(str_concat("pc_neg=", to_str(pc_neg)));
+    println(str_concat("scale=", to_str(scale)));
+    println(str_concat("y0_0=", to_str(y0[0])));
+    println(str_concat("y1_0=", to_str(y1[0])));
+    println(str_concat("parity_ok=", to_str(ad < 0.0001)));
+    println(str_concat("pack_round_ok=", to_str(round_ad < 0.0001)));
+    println(str_concat("filter_score=", to_str(filter)));
+    println(str_concat("simd_lane_width=", to_str(simd_lane_width())));
+    println("commitment_via=scripts/starlight_steg_serve.go");
+    println("starlight_steg_trit_ok");
+}

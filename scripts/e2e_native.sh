@@ -2229,4 +2229,41 @@ grep -q 'weight_session_alibi_window_ok' /tmp/trin_alibi_win_n.txt
 grep -q 'window_ok=1' /tmp/trin_alibi_win_n.txt
 grep -q 'parity0_ok=1' /tmp/trin_alibi_win_n.txt
 
-echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar + session linear_trit + trit prepack cache + decode trit cache + layer stack trit + attn trit + decode attn trit + attn stack trit + decode stack trit + gqa stack trit + decode gqa trit + gqa swiglu prefill + tied alibi + llama namemap + alibi window)"
+echo "[llm] v1.19 Starlight BalancedStarlightDetector (fixture)"
+go test ./internal/weights -run 'Starlight|Im2col|Conv2d|BatchNorm' -count=1
+go test ./pkg/starlight -count=1
+./trin run examples/starlight_infer.trin | tee /tmp/trin_starlight_infer_i.txt
+grep -q 'starlight_infer_ok' /tmp/trin_starlight_infer_i.txt
+
+echo "[steg] v1.20 Starlight ternary CPU assist"
+go test ./internal/steg -count=1
+./trin run examples/starlight_steg_trit.trin | tee /tmp/trin_steg_i.txt
+grep -q 'starlight_steg_trit_ok' /tmp/trin_steg_i.txt
+grep -q 'parity_ok=1' /tmp/trin_steg_i.txt
+grep -q 'pack_round_ok=1' /tmp/trin_steg_i.txt
+./trin build examples/starlight_steg_trit.trin -o build/starlight_steg_trit --backend go
+./build/starlight_steg_trit | tee /tmp/trin_steg_n.txt
+grep -q 'starlight_steg_trit_ok' /tmp/trin_steg_n.txt
+grep -q 'parity_ok=1' /tmp/trin_steg_n.txt
+go run scripts/starlight_steg_serve.go demo | tee /tmp/trin_steg_serve.txt
+grep -q 'starlight_steg_serve_demo_ok=1' /tmp/trin_steg_serve.txt
+grep -q 'extract_match=1' /tmp/trin_steg_serve.txt
+
+echo "[steg] v1.21 tiny trit stego-CNN scaffold (not production detector)"
+go run scripts/gen_tiny_steg_cnn_gguf.go .
+go test ./internal/steg -count=1
+go run scripts/starlight_steg_serve.go cnn | tee /tmp/trin_steg_cnn_serve.txt
+grep -q 'starlight_steg_serve_cnn_ok=1' /tmp/trin_steg_cnn_serve.txt
+grep -q 'python_proxy=0' /tmp/trin_steg_cnn_serve.txt
+grep -q 'runtime=trin_in_stargate' /tmp/trin_steg_cnn_serve.txt
+./trin run examples/starlight_steg_cnn.trin | tee /tmp/trin_steg_cnn_i.txt
+grep -q 'starlight_steg_cnn_ok' /tmp/trin_steg_cnn_i.txt
+grep -q 'L0_parity=1' /tmp/trin_steg_cnn_i.txt
+grep -q 'Head_parity=1' /tmp/trin_steg_cnn_i.txt
+grep -q 'no_python=1' /tmp/trin_steg_cnn_i.txt
+./trin build examples/starlight_steg_cnn.trin -o build/starlight_steg_cnn --backend go
+./build/starlight_steg_cnn | tee /tmp/trin_steg_cnn_n.txt
+grep -q 'starlight_steg_cnn_ok' /tmp/trin_steg_cnn_n.txt
+grep -q 'L0_parity=1' /tmp/trin_steg_cnn_n.txt
+
+echo "OK: all examples interpret + native compile/run without python3 (backend=go + optional llvm link + full-program llvm + vec loops + mlir dialect + mlir→llvm + full-program mlir + vec8/vec16 tiles + portable/HW VLEN + runtime feature dispatch + dialect rewrites/CSE/vwidth/strength/span_alg/bitplane/nested + dyn tiles + residual/auto peel + store peels + tree/gemm folds + adaptive tiles + map/store peels + soft_mux forest + scan/reduce peels + deep forest + scan-mul + AdaptivePeelChunks + wide ladder + fused scan-reduce + dyn32 + VL>32 + multi-out fused + RDVL + pair/tuple + live RDVL + lang pair + SME VL + pair-of-pairs exhaust + ZA outer-acc + weighted multi-candidate fusion + ADT forest zip/map folds + multi-tile auto peels + fusion PGO window + keyed/multi reduce + VL-fb/live peels + PGO decay/EMA + map+reduce + simd bitplanes + kv cache + deterministic sample + cuda path + ptx layer + vocab/gguf decode + linear_trit simd + bpe sidecar + session linear_trit + trit prepack cache + decode trit cache + layer stack trit + attn trit + decode attn trit + attn stack trit + decode stack trit + gqa stack trit + decode gqa trit + gqa swiglu prefill + tied alibi + llama namemap + alibi window + starlight detector + starlight steg + tiny trit stego-cnn)"

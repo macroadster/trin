@@ -1,0 +1,94 @@
+// v1.21 — tiny trit stego-CNN scaffold: GGUF → trit prepack → assist scan
+// Graph (export from CNN im2col): L0 32×64 → SiLU → L1 16×32 → SiLU → Head 2×16
+// Fixture: demos/weights/tiny_steg_cnn.gguf
+// Runtime: pure Trin/Go — no Python proxy.
+// Note: production BalancedStarlightDetector is v1.19 (pkg/starlight / starlight_infer.trin).
+
+fn make_x64() {
+    // residual-ish + level features (matches FeaturesFromImage half/half story)
+    let p = [
+        0.2, -0.1, 0.15, -0.05, 0.3, -0.2, 0.1, 0.0,
+        0.05, -0.15, 0.25, -0.1, 0.0, 0.2, -0.05, 0.1,
+        0.4, -0.3, 0.1, 0.05, -0.2, 0.15, 0.0, -0.1,
+        0.1, 0.0, -0.1, 0.2, -0.15, 0.05, 0.25, -0.05
+    ]; // 32 residual-ish
+    let q = [
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75,
+        0.5, -0.5, 0.25, -0.25, 0.1, -0.1, 0.75, -0.75
+    ]; // 32 level
+    span_concat(p, q)
+}
+
+fn main() {
+    let K0 = 64;
+    let H0 = 32;
+    let H1 = 16;
+    let C = 2;
+    let x = make_x64();
+    let sid = open_weight_session("demos/weights/tiny_steg_cnn.gguf");
+
+    let arch = weight_session_meta(sid, "general.architecture");
+    let runtime = weight_session_meta(sid, "starlight.steg.runtime");
+    let no_py = weight_session_meta(sid, "starlight.steg.no_python");
+    println(str_concat("arch=", arch));
+    println(str_concat("runtime=", runtime));
+    println(str_concat("no_python=", no_py));
+
+    // prepack once
+    let b0 = weight_session_prepack_trit(sid, "L0", K0);
+    let b1 = weight_session_prepack_trit(sid, "L1", H0);
+    let b2 = weight_session_prepack_trit(sid, "Head", H1);
+    let h0 = weight_session_prepack_trit(sid, "L0", K0); // hit
+    println(str_concat("prepack_L0=", to_str(b0)));
+    println(str_concat("prepack_L1=", to_str(b1)));
+    println(str_concat("prepack_Head=", to_str(b2)));
+    println(str_concat("prepack_L0_hit=", to_str(h0 == 0)));
+
+    // L0 → silu
+    let r0s = weight_session_linear_trit_cached(sid, "L0", x, H0, K0, 0);
+    let r0p = weight_session_linear_trit_cached(sid, "L0", x, H0, K0, 1);
+    let y0s = r0s[0];
+    let y0p = r0p[0];
+    let d0 = y0s[0] - y0p[0];
+    let a0 = (d0 < 0.0) | (0.0 - d0) | d0;
+    let h0a = silu(y0p);
+
+    // L1 → silu
+    let r1s = weight_session_linear_trit_cached(sid, "L1", h0a, H1, H0, 0);
+    let r1p = weight_session_linear_trit_cached(sid, "L1", h0a, H1, H0, 1);
+    let y1s = r1s[0];
+    let y1p = r1p[0];
+    let d1 = y1s[0] - y1p[0];
+    let a1 = (d1 < 0.0) | (0.0 - d1) | d1;
+    let h1a = silu(y1p);
+
+    // Head → logits [clean, stego]
+    let rHs = weight_session_linear_trit_cached(sid, "Head", h1a, C, H1, 0);
+    let rHp = weight_session_linear_trit_cached(sid, "Head", h1a, C, H1, 1);
+    let ls = rHs[0];
+    let lp = rHp[0];
+    let dH0 = ls[0] - lp[0];
+    let aH0 = (dH0 < 0.0) | (0.0 - dH0) | dH0;
+    let dH1 = ls[1] - lp[1];
+    let aH1 = (dH1 < 0.0) | (0.0 - dH1) | dH1;
+
+    let clean = lp[0];
+    let stego = lp[1];
+    let margin = stego - clean;
+    let is_stego = margin > 0.0;
+
+    println(str_concat("L0_parity=", to_str(a0 < 0.0001)));
+    println(str_concat("L1_parity=", to_str(a1 < 0.0001)));
+    println(str_concat("Head_parity=", to_str((aH0 < 0.0001) * (aH1 < 0.0001))));
+    println(str_concat("clean_logit=", to_str(clean)));
+    println(str_concat("stego_logit=", to_str(stego)));
+    println(str_concat("margin=", to_str(margin)));
+    println(str_concat("decision_stego=", to_str(is_stego)));
+    println(str_concat("simd_lane_width=", to_str(simd_lane_width())));
+
+    close_weight_session(sid);
+    println("starlight_steg_cnn_ok=1");
+    println("starlight_steg_cnn_ok");
+}

@@ -14,7 +14,8 @@ import (
 	"github.com/macroadster/trin/internal/parser"
 )
 
-const version = "1.19.0-go"
+// 1.19 = BalancedStarlightDetector (upstream). 1.20 = steg assist. 1.21 = tiny trit CNN.
+const version = "1.21.0-go"
 
 func main() {
 	if len(os.Args) < 2 {
