@@ -282,16 +282,18 @@ $L_done:
 	return PTXModule{Name: PTXLinearTritEntry, Source: src, Arch: arch}
 }
 
-// AllPTXModules returns the three primary kernels for arch.
+// AllPTXModules returns all primary kernels for arch (including dequant-fused).
 func AllPTXModules(arch string) []PTXModule {
 	if arch == "" {
 		arch = PTXArch()
 	}
-	return []PTXModule{
+	mods := []PTXModule{
 		EmitLinearF32PTX(arch),
 		EmitGemmF32PTX(arch),
 		EmitLinearTritPTX(arch),
 	}
+	mods = append(mods, AllDequantPTXModules(arch)...)
+	return mods
 }
 
 // FindPTXAS locates ptxas (PATH, then common venv / CUDA roots).
@@ -396,6 +398,12 @@ func PlanLaunch(entry string) LaunchStatus {
 	case PTXLinearTritEntry, "linear_trit", "cuda_linear_trit":
 		mod = EmitLinearTritPTX("")
 		st.Entry = PTXLinearTritEntry
+	case PTXDequantLinearQ4_0Entry, "dequant_linear_q4_0", "cuda_dequant_linear_q4_0":
+		mod = EmitDequantLinearQ4_0PTX("")
+		st.Entry = PTXDequantLinearQ4_0Entry
+	case PTXDequantLinearQ8_0Entry, "dequant_linear_q8_0", "cuda_dequant_linear_q8_0":
+		mod = EmitDequantLinearQ8_0PTX("")
+		st.Entry = PTXDequantLinearQ8_0Entry
 	default:
 		st.Reason = "unknown entry " + entry
 		return st

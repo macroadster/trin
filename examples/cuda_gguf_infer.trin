@@ -1,0 +1,66 @@
+// v1.20 — CUDA GGUF inference demo
+// Uses the cuda_session_linear path to run GGUF weight inference through the
+// CUDA dequant-fused backend. On hosts without a GPU the CPU-fallback produces
+// identical results; the CUDA PTX kernels are still emitted and (optionally)
+// assembled by ptxas.
+//
+// Loads the toy.gguf fixture (F32), runs both the standard and CUDA session
+// linear paths, and verifies parity. Also exercises the dequant PTX surface.
+
+fn main() {
+    // ---- CUDA backend status ----
+    let be = cuda_backend();
+    println(str_concat("cuda_backend=", be));
+
+    // ---- Dequant PTX kernels ----
+    let src_q4 = cuda_dequant_ptx_source("dequant_linear_q4_0");
+    println(str_concat("q4_ptx_len=", to_str(str_len(src_q4))));
+    let src_q8 = cuda_dequant_ptx_source("dequant_linear_q8_0");
+    println(str_concat("q8_ptx_len=", to_str(str_len(src_q8))));
+
+    // Plan launch for dequant kernels
+    let plan = cuda_plan_launch("dequant_linear_q4_0");
+    println(str_concat("q4_entry=", plan[3]));
+    let plan8 = cuda_plan_launch("dequant_linear_q8_0");
+    println(str_concat("q8_entry=", plan8[3]));
+
+    // ---- Weight session: F32 GGUF → CUDA session linear parity ----
+    let sid = open_weight_session("demos/weights/toy.gguf");
+    let names = weight_session_list(sid);
+    println(str_concat("tensors=", to_str(len(names))));
+
+    // Load "weight" tensor shape to get M, K
+    let shape = weight_session_shape(sid, "weight");
+    let K = shape[0];
+    let M = shape[1];
+    println(str_concat("M=", to_str(M)));
+    println(str_concat("K=", to_str(K)));
+
+    // Build x vector
+    let x = [1.0, 0.5, -1.0];
+
+    // Standard path
+    let y_std = weight_session_linear(sid, "weight", x, M, K);
+    println(str_concat("y_std=", to_str(y_std)));
+
+    // CUDA session linear path (dispatches to dequant-fused for Q4_0/Q8_0,
+    // or falls back to decode+linear for F32 tensors like this one)
+    let y_cuda = cuda_session_linear(sid, "weight", x, M, K);
+    println(str_concat("y_cuda=", to_str(y_cuda)));
+
+    // Parity check
+    let eps = 0.001;
+    let diff0 = y_std[0] - y_cuda[0];
+    let diff1 = y_std[1] - y_cuda[1];
+    let close0 = (diff0 < eps) * (diff0 > (0.0 - eps));
+    let close1 = (diff1 < eps) * (diff1 > (0.0 - eps));
+    println(str_concat("parity=", to_str(close0 * close1)));
+
+    // CUDA session trit linear path
+    let yt = cuda_session_linear_trit(sid, "weight", x, M, K);
+    println(str_concat("yt_len=", to_str(len(yt[0]))));
+    println(str_concat("yt_scale=", to_str(yt[1])));
+
+    close_weight_session(sid);
+    println("cuda_gguf_infer_ok");
+}

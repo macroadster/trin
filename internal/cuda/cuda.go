@@ -217,6 +217,114 @@ func LinearTrit(Wtrit []int32, x []float32, M, K int, scale float32) ([]float32,
 	return out, nil
 }
 
+// DequantLinearQ4_0 computes y[M] = dequant(W_q4_0[M,K]) @ x[K].
+// W is row-major Q4_0 blocks (18 bytes per 32-element block).
+// K must be a multiple of 32. CPU fallback path; mirrors the PTX kernel.
+func DequantLinearQ4_0(W []byte, x []float32, M, K int) ([]float32, error) {
+	if M < 0 || K < 0 {
+		return nil, errMsg("cuda_dequant_linear_q4_0: negative dims")
+	}
+	if K%32 != 0 {
+		return nil, errMsg("cuda_dequant_linear_q4_0: K must be multiple of 32")
+	}
+	nbk := K / 32
+	blkSize := 18
+	needBytes := M * nbk * blkSize
+	if len(W) < needBytes {
+		return nil, errMsg("cuda_dequant_linear_q4_0: W too short")
+	}
+	if len(x) < K {
+		return nil, errMsg("cuda_dequant_linear_q4_0: x too short")
+	}
+	out := make([]float32, M)
+	for row := 0; row < M; row++ {
+		acc := float32(0)
+		rowOff := row * nbk * blkSize
+		for b := 0; b < nbk; b++ {
+			bOff := rowOff + b*blkSize
+			d := float16ToFloat32(uint16(W[bOff]) | uint16(W[bOff+1])<<8)
+			for j := 0; j < 16; j++ {
+				nib := W[bOff+2+j]
+				q0 := float32(int(nib&0x0F)-8) * d
+				q1 := float32(int(nib>>4)-8) * d
+				k0 := b*32 + j
+				k1 := b*32 + j + 16
+				acc += q0*x[k0] + q1*x[k1]
+			}
+		}
+		out[row] = acc
+	}
+	return out, nil
+}
+
+// DequantLinearQ8_0 computes y[M] = dequant(W_q8_0[M,K]) @ x[K].
+// W is row-major Q8_0 blocks (34 bytes per 32-element block: half d + 32 int8).
+// K must be a multiple of 32.
+func DequantLinearQ8_0(W []byte, x []float32, M, K int) ([]float32, error) {
+	if M < 0 || K < 0 {
+		return nil, errMsg("cuda_dequant_linear_q8_0: negative dims")
+	}
+	if K%32 != 0 {
+		return nil, errMsg("cuda_dequant_linear_q8_0: K must be multiple of 32")
+	}
+	nbk := K / 32
+	blkSize := 34
+	needBytes := M * nbk * blkSize
+	if len(W) < needBytes {
+		return nil, errMsg("cuda_dequant_linear_q8_0: W too short")
+	}
+	if len(x) < K {
+		return nil, errMsg("cuda_dequant_linear_q8_0: x too short")
+	}
+	out := make([]float32, M)
+	for row := 0; row < M; row++ {
+		acc := float32(0)
+		rowOff := row * nbk * blkSize
+		for b := 0; b < nbk; b++ {
+			bOff := rowOff + b*blkSize
+			d := float16ToFloat32(uint16(W[bOff]) | uint16(W[bOff+1])<<8)
+			for j := 0; j < 32; j++ {
+				q := int8(W[bOff+2+j])
+				acc += float32(q) * d * x[b*32+j]
+			}
+		}
+		out[row] = acc
+	}
+	return out, nil
+}
+
+// float16ToFloat32 converts an IEEE-754 half-precision (f16) bit pattern to f32.
+//
+// Subnormal handling: exp starts at 0 and decrements (unsigned wrap-around)
+// while normalizing the mantissa. The subsequent exp++ and bias adjustment
+// (exp + 112) still produce the correct biased f32 exponent because the
+// wrap-around values cancel out during the final addition.
+func float16ToFloat32(bits uint16) float32 {
+	sign := uint32(bits>>15) & 1
+	exp := uint32(bits>>10) & 0x1F
+	man := uint32(bits) & 0x3FF
+	if exp == 0 {
+		if man == 0 {
+			return float32frombits(sign << 31)
+		}
+		// subnormal → normalize: shift mantissa up until the implicit 1-bit
+		// is in position 10. exp-- uses unsigned wrap-around intentionally;
+		// the net result after exp++ is a small negative offset that the
+		// bias adjustment (127 - 15) absorbs correctly.
+		for man&0x400 == 0 {
+			man <<= 1
+			exp--
+		}
+		exp++
+		man &= 0x3FF
+	} else if exp == 31 {
+		// inf / nan
+		return float32frombits((sign << 31) | 0x7F800000 | (man << 13))
+	}
+	exp = exp + (127 - 15)
+	return float32frombits((sign << 31) | (exp << 23) | (man << 13))
+}
+
 // ResetProbeForTest clears the once-probe (tests only).
 func ResetProbeForTest() {
 	probeOnce = sync.Once{}

@@ -11642,7 +11642,7 @@ func (it *Interpreter) installBuiltins() {
 	nat("cuda_ptx_arch", func(args []Value) (Value, error) {
 		return Str(cuda.PTXArch()), nil
 	})
-	// cuda_ptx_source(kind) kind: linear_f32 | gemm_f32 | linear_trit
+	// cuda_ptx_source(kind) kind: linear_f32 | gemm_f32 | linear_trit | dequant_linear_q4_0 | dequant_linear_q8_0
 	nat("cuda_ptx_source", func(args []Value) (Value, error) {
 		kind := "linear_f32"
 		if len(args) >= 1 {
@@ -11656,8 +11656,12 @@ func (it *Interpreter) installBuiltins() {
 			mod = cuda.EmitGemmF32PTX("")
 		case "linear_trit", "cuda_linear_trit", cuda.PTXLinearTritEntry:
 			mod = cuda.EmitLinearTritPTX("")
+		case "dequant_linear_q4_0", "q4_0", cuda.PTXDequantLinearQ4_0Entry:
+			mod = cuda.EmitDequantLinearQ4_0PTX("")
+		case "dequant_linear_q8_0", "q8_0", cuda.PTXDequantLinearQ8_0Entry:
+			mod = cuda.EmitDequantLinearQ8_0PTX("")
 		default:
-			return Void(), &Error{Msg: "cuda_ptx_source(kind): want linear_f32|gemm_f32|linear_trit"}
+			return Void(), &Error{Msg: "cuda_ptx_source(kind): want linear_f32|gemm_f32|linear_trit|dequant_linear_q4_0|dequant_linear_q8_0"}
 		}
 		return Str(mod.Source), nil
 	})
@@ -11716,6 +11720,10 @@ func (it *Interpreter) installBuiltins() {
 			mod = cuda.EmitGemmF32PTX("")
 		case "linear_trit", "cuda_linear_trit", cuda.PTXLinearTritEntry:
 			mod = cuda.EmitLinearTritPTX("")
+		case "dequant_linear_q4_0", "q4_0", cuda.PTXDequantLinearQ4_0Entry:
+			mod = cuda.EmitDequantLinearQ4_0PTX("")
+		case "dequant_linear_q8_0", "q8_0", cuda.PTXDequantLinearQ8_0Entry:
+			mod = cuda.EmitDequantLinearQ8_0PTX("")
 		default:
 			return Void(), &Error{Msg: "cuda_compile_ptx(kind)"}
 		}
@@ -11793,6 +11801,130 @@ func (it *Interpreter) installBuiltins() {
 			return Void(), &Error{Msg: err.Error()}
 		}
 		return I32(b.N), nil
+	})
+
+	// ---- CUDA GGUF inference backend (v1.20) ----
+	// Connects weight sessions to CUDA dequant-fused matvec kernels so that
+	// GGUF models with Q4_0 / Q8_0 quantisation can run inference on GPU
+	// (or CPU fallback) without a separate dequant pass.
+
+	// cuda_session_linear(id, name, x, M, K) → span[f32]
+	// Loads tensor `name` from weight session `id`, dispatches to the fused
+	// dequant-linear CUDA kernel for Q4_0/Q8_0, or decodes to f32 + linear for others.
+	nat("cuda_session_linear", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_session_linear(id, name, x, M, K)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_linear: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		y, err := s.CUDALinear(strArg(args[1]), x, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_linear: " + err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+
+	// cuda_session_linear_trit(id, name, x, M, K) → [y:span f32, scale:f32]
+	// Decodes W from GGUF, absmean-quantizes to trits, runs matvec via CUDA trit kernel.
+	nat("cuda_session_linear_trit", func(args []Value) (Value, error) {
+		if len(args) < 5 || args[2].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_session_linear_trit(id, name, x, M, K)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_linear_trit: " + err.Error()}
+		}
+		xspan := args[2].Span
+		x := make([]float32, len(xspan))
+		for i, v := range xspan {
+			x[i] = float32(v.AsFloat())
+		}
+		M, K := args[3].AsInt(), args[4].AsInt()
+		y, scale, err := s.CUDALinearTrit(strArg(args[1]), x, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_linear_trit: " + err.Error()}
+		}
+		return Span([]Value{f32SliceToSpan(y), F32(float64(scale))}), nil
+	})
+
+	// cuda_session_tensor_qtype(id, name) → span[type_code:i32, n_elem:i32]
+	// Inspects the GGML quant type and element count for a named tensor.
+	nat("cuda_session_tensor_qtype", func(args []Value) (Value, error) {
+		if len(args) < 2 {
+			return Void(), &Error{Msg: "cuda_session_tensor_qtype(id, name)"}
+		}
+		s, err := weights.GetSession(int32(args[0].AsInt()))
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_tensor_qtype: " + err.Error()}
+		}
+		qt, nElem, err := s.TensorQType(strArg(args[1]))
+		if err != nil {
+			return Void(), &Error{Msg: "cuda_session_tensor_qtype: " + err.Error()}
+		}
+		return Span([]Value{I32(int(qt)), I32(nElem)}), nil
+	})
+
+	// cuda_dequant_linear_q4_0(W_bytes_span, x, M, K) → span[f32]
+	// CPU-fallback dequant-fused Q4_0 linear when called with Trin span data.
+	nat("cuda_dequant_linear_q4_0", func(args []Value) (Value, error) {
+		if len(args) < 4 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q4_0(W_bytes, x, M, K)"}
+		}
+		M, K := args[2].AsInt(), args[3].AsInt()
+		if M <= 0 || K <= 0 || K%32 != 0 {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q4_0: bad M/K (K must be multiple of 32)"}
+		}
+		if len(args[1].Span) < K {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q4_0: x span shorter than K"}
+		}
+		wb := make([]byte, len(args[0].Span))
+		for i, v := range args[0].Span {
+			wb[i] = byte(v.AsInt())
+		}
+		x := make([]float32, len(args[1].Span))
+		for i, v := range args[1].Span {
+			x[i] = float32(v.AsFloat())
+		}
+		y, err := cuda.DequantLinearQ4_0(wb, x, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(y), nil
+	})
+
+	// cuda_dequant_linear_q8_0(W_bytes_span, x, M, K) → span[f32]
+	nat("cuda_dequant_linear_q8_0", func(args []Value) (Value, error) {
+		if len(args) < 4 || args[0].Kind != VSpan || args[1].Kind != VSpan {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q8_0(W_bytes, x, M, K)"}
+		}
+		M, K := args[2].AsInt(), args[3].AsInt()
+		if M <= 0 || K <= 0 || K%32 != 0 {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q8_0: bad M/K (K must be multiple of 32)"}
+		}
+		if len(args[1].Span) < K {
+			return Void(), &Error{Msg: "cuda_dequant_linear_q8_0: x span shorter than K"}
+		}
+		wb := make([]byte, len(args[0].Span))
+		for i, v := range args[0].Span {
+			wb[i] = byte(v.AsInt())
+		}
+		x := make([]float32, len(args[1].Span))
+		for i, v := range args[1].Span {
+			x[i] = float32(v.AsFloat())
+		}
+		y, err := cuda.DequantLinearQ8_0(wb, x, M, K)
+		if err != nil {
+			return Void(), &Error{Msg: err.Error()}
+		}
+		return f32SliceToSpan(y), nil
 	})
 
 	// ---- Starlight CNN / BalancedStarlightDetector (v1.19) ----
