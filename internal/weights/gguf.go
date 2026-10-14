@@ -11,8 +11,8 @@ import (
 
 // GGML type codes we decode to f32 (block quants in ggml_dequant.go).
 const (
-	GGML_F32  = 0
-	GGML_F16  = 1
+	GGML_F32 = 0
+	GGML_F16 = 1
 	// Q4_0..Q6_K defined in ggml_dequant.go
 	GGML_Q8_0 = 8
 	GGML_I8   = 24
@@ -45,7 +45,8 @@ type GGUFFile struct {
 	DataBase   int64 // absolute offset of tensor data region
 	Tensors    []GGUFTensorInfo
 	ByName     map[string]GGUFTensorInfo
-	Meta       map[string]string // string metadata only (summary)
+	Meta       map[string]string // string metadata (large arrays are summarized)
+	Raw        map[string]any    // original KV values, including token arrays
 	Mapped     bool
 	mf         *mappedFile
 	IsSharded  bool
@@ -97,6 +98,7 @@ func OpenGGUF(path string) (*GGUFFile, error) {
 		Data:      b,
 		ByName:    make(map[string]GGUFTensorInfo),
 		Meta:      make(map[string]string),
+		Raw:       make(map[string]any),
 		Mapped:    mf.Mapped,
 		mf:        mf,
 	}
@@ -120,8 +122,12 @@ func OpenGGUF(path string) (*GGUFFile, error) {
 				f.Alignment = uint64(u32)
 			}
 		}
+		f.Raw[key] = val
 		if s, ok := val.(string); ok {
 			f.Meta[key] = s
+		} else if arr, ok := val.([]any); ok && len(arr) > 64 {
+			// Vocab and merge lists are large. Keep them in Raw, not one sprint.
+			f.Meta[key] = fmt.Sprintf("array(%d)", len(arr))
 		} else {
 			f.Meta[key] = fmt.Sprint(val)
 		}

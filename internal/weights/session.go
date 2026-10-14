@@ -35,15 +35,15 @@ type TritPack struct {
 	M     int
 	K     int
 	Scale float32
-	W     []int8    // row-major M*K trits
-	Pos   []uint32  // M * nw packed positive planes
-	Neg   []uint32  // M * nw packed negative planes
-	NW    int       // words per row: (K+31)/32
+	W     []int8   // row-major M*K trits
+	Pos   []uint32 // M * nw packed positive planes
+	Neg   []uint32 // M * nw packed negative planes
+	NW    int      // words per row: (K+31)/32
 }
 
 var (
 	sessMu   sync.Mutex
-	sessMap  = map[int32]*WeightSession{}
+	sessMap        = map[int32]*WeightSession{}
 	sessNext int32 = 1 // atomic-ish via mutex + add
 )
 
@@ -203,11 +203,20 @@ func (s *WeightSession) Shape(name string) ([]int64, error) {
 }
 
 // Meta returns GGUF string metadata value (empty if missing / safetensors).
+// Large arrays are summarized as "array(N)". Use MetaValue for the raw list.
 func (s *WeightSession) Meta(key string) string {
 	if s == nil || s.gguf == nil {
 		return ""
 	}
 	return s.gguf.Meta[key]
+}
+
+// MetaValue returns the original GGUF metadata value, including arrays.
+func (s *WeightSession) MetaValue(key string) any {
+	if s == nil || s.gguf == nil || s.gguf.Raw == nil {
+		return nil
+	}
+	return s.gguf.Raw[key]
 }
 
 // LoadF32 decodes one named tensor using the retained mapping.
@@ -239,7 +248,6 @@ func SessionCount() int {
 	defer sessMu.Unlock()
 	return len(sessMap)
 }
-
 
 // LoadF32Window loads a contiguous element window from a retained session.
 // Name is resolved through the session NameMap when set (v1.17).
